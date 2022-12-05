@@ -1,0 +1,21 @@
+[package]
+name = "p9cpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libp9cpu = { version = "*", path = "../libp9cpu" }
+futures = "0.3.25"
+async-trait = "0.1.59"
+prost = "0.11.3"
+tonic = "0.8.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread","process","io-std"] }
+tokio-stream = { version = "0.1.11", features = ["net"] }
+uuid = { version = "1.2.2", features = ["v4","fast-rng","macro-diagnostics"] }
+thiserror = "1"
+anyhow = "1"
+tower = "0.4.13"
+clap = { version = "4.0.29", features = ["derive"] }
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["clap"]

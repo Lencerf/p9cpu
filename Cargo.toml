@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/p9cpu",
+    "crates/p9cpud",
+    "crates/libp9cpu"
+]
