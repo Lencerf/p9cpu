@@ -7,29 +7,33 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::{
-    net::UnixListener,
-    sync::{mpsc},
-    task::JoinHandle,
-};
+use tokio::sync::oneshot;
+use tokio::{net::UnixListener, sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::transport::{Channel, Endpoint, Server};
-
 
 use crate::client::P9cpuCommand;
 
 #[derive(Error, Debug)]
 pub enum P9cpuClientError {
-    #[error("command not started")]
+    #[error("Command not started")]
     NotStarted,
     #[error("Command exits with {0}")]
     NonZeroExitCode(i32),
+    #[error("Command already started")]
+    AlreadyStarted,
+}
+
+struct SessionInfo {
+    sid: uuid::Uuid,
+    handles: Vec<JoinHandle<()>>,
+    stop_tx: oneshot::Sender<()>,
 }
 
 pub struct P9cpuClient {
     stdin_tx: mpsc::Sender<mpsc::Receiver<P9cpuStdinRequest>>,
     rpc_client: p9cpu_client::P9cpuClient<Channel>,
-    sessions: HashMap<uuid::Uuid, Vec<JoinHandle<()>>>,
+    session_info: Option<SessionInfo>,
 }
 
 impl P9cpuClient {
@@ -50,11 +54,14 @@ impl P9cpuClient {
         Ok(Self {
             stdin_tx,
             rpc_client: client,
-            sessions: HashMap::new(),
+            session_info: None,
         })
     }
 
     pub async fn start(&mut self, command: P9cpuCommand) -> Result<uuid::Uuid> {
+        if self.session_info.is_some() {
+            return Err(P9cpuClientError::AlreadyStarted)?;
+        }
         let start_req = command;
         let id = self.rpc_client.start(start_req).await?.into_inner().id;
         let sid = uuid::Uuid::from_slice(&id)?;
@@ -69,6 +76,7 @@ impl P9cpuClient {
                 // println!("{}", String::from_utf8_lossy(&resp.data))
                 // stdout
             }
+            println!("std out thread is done");
         });
         let session_id = P9cpuSessionId { id: id.clone() };
         let mut err_stream = self.rpc_client.stderr(session_id).await?.into_inner();
@@ -80,48 +88,56 @@ impl P9cpuClient {
                     break;
                 }
             }
+            println!("std err thread is done");
         });
         let (tx, rx) = mpsc::channel(4);
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         self.stdin_tx.send(rx).await?;
         let id_vec = id.clone();
         let stdin_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; 8];
-            let Result::Ok(len) = tokio::io::stdin().read(&mut buf).await else { return };
-            buf.truncate(len);
-            let first_req = P9cpuStdinRequest {
-                id: Some(id_vec),
-                data: buf,
-            };
-            if let Err(e) = tx.send(first_req).await {
-                println!("send first request fail {:?}", e);
-                return;
-            }
+            let mut id = Some(id_vec);
             loop {
                 let mut buf = vec![0u8; 8];
-                let Result::Ok(len) = tokio::io::stdin().read(&mut buf).await else { return };
+                // stop_rx
+                let mut stdin = tokio::io::stdin();
+                let Result::Ok(len) = tokio::select! {
+                    len = stdin.read(&mut buf) => len,
+                    _ = &mut stop_rx => break,
+                } else {
+                    // println!("stdin read returns err");
+                    break
+                };
                 buf.truncate(len);
                 let req = P9cpuStdinRequest {
-                    id: None,
+                    id: id.take(),
                     data: buf,
                 };
-                if let Err(e) = tx.send(req).await {
-                    println!("send request fail {:?}", e);
+                if let Err(_) = tx.send(req).await {
+                    // println!("send request fail {:?}", e);
                     break;
                 }
             }
+            // println!("std in thread is done");
         });
         // let stdin_stream = ReceiverStream::new(rx);
         // self.rpc_client.stdin(stdin_stream).await?;
-        self.sessions
-            .insert(sid, vec![out_handle, err_handle, stdin_handle]);
+        self.session_info = Some(SessionInfo {
+            sid,
+            handles: vec![out_handle, err_handle, stdin_handle],
+            stop_tx,
+        });
         // println!("session started at {:?}", SystemTime::now());
         Ok(sid)
     }
 
-    pub async fn wait(&mut self, sid: uuid::Uuid) -> Result<()> {
-        let handles = self
-            .sessions
-            .remove(&sid)
+    pub async fn wait(&mut self) -> Result<()> {
+        let SessionInfo {
+            sid,
+            handles,
+            stop_tx,
+        } = self
+            .session_info
+            .take()
             .ok_or(P9cpuClientError::NotStarted)?;
         let wait_request = P9cpuSessionId {
             id: sid.into_bytes().to_vec(),
@@ -137,9 +153,13 @@ impl P9cpuClient {
             }
             Err(e) => Err(e)?,
         };
-        // println!("rpc wait done at {:?}", SystemTime::now());
+        if let Err(()) = stop_tx.send(()) {
+            eprintln!("stdin thread not working");
+        }
         for handle in handles {
-            handle.await?;
+            if let Err(e) = handle.await {
+                println!("error = {:?}", e);
+            }
         }
         ret
     }

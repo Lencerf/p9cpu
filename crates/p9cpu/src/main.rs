@@ -34,7 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // println!("{:?}", cmd);
     let sid = client.start(cmd).await?;
-    client.wait(sid).await?;
+    println!("start is done");
+    client.wait().await?;
+    println!("wait is done");
 
     // let stdout_request = P9cpuStdoutRequest {
     //     id: r.id,
