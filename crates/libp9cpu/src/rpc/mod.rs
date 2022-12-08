@@ -39,16 +39,20 @@ pub struct P9cpuClient {
 impl P9cpuClient {
     pub async fn new(_net: &str, addr: &str) -> Result<Self> {
         let channel = Endpoint::from_shared(addr.to_string())?.connect().await?;
-        let (stdin_tx, mut stdin_rx) = mpsc::channel(4);
+        let (stdin_tx, mut stdin_rx) = mpsc::channel(1);
         let client = p9cpu_client::P9cpuClient::new(channel.clone());
         tokio::spawn(async move {
             let mut stdin_client = p9cpu_client::P9cpuClient::new(channel);
             while let Some(receiver) = stdin_rx.recv().await {
+                // println!("stdin thread get sender");
                 // stdin_client
                 let in_stream = ReceiverStream::new(receiver);
                 if let Err(e) = stdin_client.stdin(in_stream).await {
-                    println!("stdin_client.stdin error = {:?}", e);
+                    // println!("stdin_client.stdin error = {:?}", e);
+                } else {
+                    // println!("stdin thread send stream");
                 }
+                // println!("one stdin thread sender is done");
             }
         });
         Ok(Self {
@@ -68,15 +72,16 @@ impl P9cpuClient {
         let session_id = P9cpuSessionId { id: id.clone() };
         let mut out_stream = self.rpc_client.stdout(session_id).await?.into_inner();
         let out_handle = tokio::spawn(async move {
+            let mut stdout = tokio::io::stdout();
             while let Some(Result::Ok(resp)) = out_stream.next().await {
-                // println!("get buff at {:?}", SystemTime::now());
-                if tokio::io::stdout().write_all(&resp.data).await.is_err() {
+                // println!("get {:?} buff at {:?}", resp.data, std::time::SystemTime::now());
+                if stdout.write_all(&resp.data).await.is_err() || stdout.flush().await.is_err() {
                     break;
                 }
                 // println!("{}", String::from_utf8_lossy(&resp.data))
                 // stdout
             }
-            println!("std out thread is done");
+            // println!("std out thread is done");
         });
         let session_id = P9cpuSessionId { id: id.clone() };
         let mut err_stream = self.rpc_client.stderr(session_id).await?.into_inner();
@@ -84,20 +89,20 @@ impl P9cpuClient {
             while let Some(Result::Ok(resp)) = err_stream.next().await {
                 // println!("get buff at {:?}", SystemTime::now());
                 // std::io::stderr().write_all(&resp.data).unwrap();
-                if tokio::io::stderr().write_all(&resp.data).await.is_err() {
+                if tokio::io::stderr().write_all(&resp.data).await.is_err() || tokio::io::stderr().flush().await.is_err() {
                     break;
                 }
             }
-            println!("std err thread is done");
+            // println!("std err thread is done");
         });
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(1);
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         self.stdin_tx.send(rx).await?;
         let id_vec = id.clone();
         let stdin_handle = tokio::spawn(async move {
             let mut id = Some(id_vec);
             loop {
-                let mut buf = vec![0u8; 8];
+                let mut buf = vec![0u8; 1];
                 // stop_rx
                 let mut stdin = tokio::io::stdin();
                 let Result::Ok(len) = tokio::select! {
@@ -108,6 +113,7 @@ impl P9cpuClient {
                     break
                 };
                 buf.truncate(len);
+                // println!("stdin get buff {:?}", &buf);
                 let req = P9cpuStdinRequest {
                     id: id.take(),
                     data: buf,
@@ -131,6 +137,10 @@ impl P9cpuClient {
     }
 
     pub async fn wait(&mut self) -> Result<()> {
+        let current = nix::sys::termios::tcgetattr(0).unwrap();
+        let mut raw = current.clone();
+        nix::sys::termios::cfmakeraw(&mut raw);
+        nix::sys::termios::tcsetattr(0, nix::sys::termios::SetArg::TCSANOW, &raw).unwrap();
         let SessionInfo {
             sid,
             handles,
@@ -161,6 +171,7 @@ impl P9cpuClient {
                 println!("error = {:?}", e);
             }
         }
+        nix::sys::termios::tcsetattr(0, nix::sys::termios::SetArg::TCSANOW, &current).unwrap();
         ret
     }
 }

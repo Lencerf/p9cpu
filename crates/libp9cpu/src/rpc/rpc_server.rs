@@ -1,17 +1,20 @@
 use super::p9cpu_server::P9cpu;
 use super::{
-    Empty, P9cpuBytes, P9cpuSessionId, P9cpuStartRequest, P9cpuStartResponse, P9cpuStdinRequest, P9cpuWaitResponse,
+    Empty, P9cpuBytes, P9cpuSessionId, P9cpuStartRequest, P9cpuStartResponse, P9cpuStdinRequest,
+    P9cpuWaitResponse,
 };
 use anyhow::Result;
 use futures::Stream;
 
 use std::fmt::Debug;
+use std::os::unix::prelude::FromRawFd;
 use std::pin::Pin;
 use std::process::Stdio;
 
+use std::rc::Rc;
 use std::vec;
 use std::{collections::HashMap, sync::Arc};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
@@ -26,10 +29,68 @@ fn vec_to_uuid(v: &Vec<u8>) -> Result<uuid::Uuid, Status> {
 }
 
 #[derive(Debug)]
+enum StdinWriter {
+    Piped(ChildStdin),
+    Pty(tokio::fs::File),
+}
+
+impl AsyncWrite for StdinWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        match &mut *self {
+            StdinWriter::Piped(inner) => Pin::new(inner).poll_write(cx, buf),
+            StdinWriter::Pty(inner) => Pin::new(inner).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            StdinWriter::Piped(inner) => Pin::new(inner).poll_flush(cx),
+            StdinWriter::Pty(inner) => Pin::new(inner).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            StdinWriter::Piped(inner) => Pin::new(inner).poll_shutdown(cx),
+            StdinWriter::Pty(inner) => Pin::new(inner).poll_shutdown(cx),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum StdoutReader {
+    Piped(ChildStdout),
+    Pty(tokio::fs::File),
+}
+
+impl AsyncRead for StdoutReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            StdoutReader::Piped(inner) => Pin::new(inner).poll_read(cx, buf),
+            StdoutReader::Pty(inner) => Pin::new(inner).poll_read(cx, buf),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Session {
-    stdin: Arc<RwLock<ChildStdin>>,
-    stdout: Arc<RwLock<ChildStdout>>,
-    stderr: Arc<RwLock<ChildStderr>>,
+    stdin: Arc<RwLock<StdinWriter>>,
+    stdout: Arc<RwLock<StdoutReader>>,
+    stderr: Arc<RwLock<Option<ChildStderr>>>,
     child: Arc<RwLock<Child>>,
     handles: Arc<RwLock<Vec<JoinHandle<()>>>>,
 }
@@ -40,11 +101,25 @@ pub struct P9cpuService {
 }
 
 impl P9cpuService {
-    async fn add_session(&self, mut child: Child) -> uuid::Uuid {
+    async fn add_session(
+        &self,
+        mut child: Child,
+        pty_master: Option<tokio::fs::File>,
+    ) -> uuid::Uuid {
         let id = uuid::Uuid::new_v4();
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
+        let (stdin, stdout, stderr) = if let Some(master) = pty_master {
+            let c = master.try_clone().await.unwrap();
+            (StdinWriter::Pty(master), StdoutReader::Pty(c), None)
+        } else {
+            let stdin = child.stdin.take().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take();
+            (
+                StdinWriter::Piped(stdin),
+                StdoutReader::Piped(stdout),
+                stderr,
+            )
+        };
         let info = Session {
             stdin: Arc::new(RwLock::new(stdin)),
             stdout: Arc::new(RwLock::new(stdout)),
@@ -76,14 +151,39 @@ impl P9cpu for P9cpuService {
 
     async fn start(&self, request: Request<P9cpuStartRequest>) -> RpcResult<P9cpuStartResponse> {
         let req = request.into_inner();
-        let ret = Command::new(req.program)
-            .args(req.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        let id = match ret {
-            Ok(child) => self.add_session(child).await,
+        let mut cmd = Command::new(req.program);
+        cmd.args(req.args);
+        let pty_master = if req.tty {
+            let ptm_fd =
+                unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+            unsafe {
+                libc::grantpt(ptm_fd);
+                libc::unlockpt(ptm_fd);
+            }
+            let mut buf: Vec<_> = vec![0; 100];
+            unsafe { libc::ptsname_r(ptm_fd, buf.as_mut_ptr() as *mut libc::c_char, 100) };
+            let pts_fd = unsafe { libc::open(buf.as_ptr() as *const libc::c_char, libc::O_RDWR) };
+            // let result = nix::pty::openpty(None, None)
+            //     .map_err(|e| Status::internal(format!("Cannot open tty: {:?}", e)))?;
+            cmd.stdin(unsafe { Stdio::from_raw_fd(pts_fd) })
+                .stdout(unsafe { Stdio::from_raw_fd(pts_fd) })
+                .stderr(unsafe { Stdio::from_raw_fd(pts_fd) });
+            unsafe {
+                cmd.pre_exec(|| {
+                    nix::unistd::setsid().unwrap();
+                    libc::ioctl(0, libc::TIOCSCTTY);
+                    Result::Ok(())
+                });
+            }
+            Some(unsafe { tokio::fs::File::from_raw_fd(ptm_fd) })
+        } else {
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            None
+        };
+        let id = match cmd.spawn() {
+            Ok(child) => self.add_session(child, pty_master).await,
             Err(e) => return Err(Status::new(Code::InvalidArgument, e.to_string())),
         };
         println!("created session {:?}", &id);
@@ -99,11 +199,16 @@ impl P9cpu for P9cpuService {
             return Err(Status::invalid_argument("no session id."));
         };
         let sid = vec_to_uuid(&id)?;
+        // println!("stdin called for session {:?}", &sid);
         let cmd_stdin = self.get_session(&sid, |s| s.stdin.clone()).await?;
+        // println!("get arc stdin");
         let mut cmd_stdin = cmd_stdin.write().await;
-        cmd_stdin.write_all(&data).await?;
+        // println!("get write to stdin");
+        cmd_stdin.write(&data).await?;
+        // println!("first {:?} write to child stdin", data);
         while let Some(Ok(req)) = in_stream.next().await {
-            cmd_stdin.write_all(&req.data).await?;
+            cmd_stdin.write(&req.data).await?;
+            // println!("{:?} write to child stdin", req.data);
         }
         Ok(Response::new(Empty {}))
     }
@@ -112,9 +217,12 @@ impl P9cpu for P9cpuService {
         let sid = vec_to_uuid(&request.into_inner().id)?;
         println!("stderr called for session {:?}", &sid);
         let cmd_stderr = self.get_session(&sid, |s| s.stderr.clone()).await?;
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(1);
         let stderr_handle = tokio::spawn(async move {
             let mut err = cmd_stderr.write().await;
+            let Some(ref mut err) = &mut *err else {
+                return;
+            };
             if let Err(e) = send_buf(&mut *err, tx, |buf| P9cpuBytes { data: buf }).await {
                 println!("err = {:?}", e)
             }
@@ -130,7 +238,7 @@ impl P9cpu for P9cpuService {
         let sid = vec_to_uuid(&request.into_inner().id)?;
         println!("stdout_st called for session {:?}", &sid);
         let cmd_stdout = self.get_session(&sid, |info| info.stdout.clone()).await?;
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(1);
         let stdout_handle = tokio::spawn(async move {
             let mut out = cmd_stdout.write().await;
             // out.read(buf)
@@ -185,8 +293,13 @@ where
         if src.read(&mut buf).await? == 0 {
             break;
         }
+        // let s = String::from_utf8(buf.clone());
         tx.send(Ok(op(buf))).await?;
-        // println!("send buf to channel at {:?}", SystemTime::now());
+        // println!(
+        //     "send buf {} to channel at {:?}",
+        //     s.unwrap(),
+        //     std::time::SystemTime::now()
+        // );
     }
     Ok(())
 }

@@ -9,13 +9,16 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Name of the person to greet
-    #[arg(short, long)]
-    name: String,
+    // /// Name of the person to greet
+    // #[arg(short, long)]
+    // name: String,
 
-    /// Number of times to greet
-    #[arg(short, long, default_value_t = 1)]
-    count: u8,
+    // /// Number of times to greet
+    // #[arg(short, long, default_value_t = 1)]
+    // count: u8,
+
+    #[arg(short, long, default_value_t = false)]
+    tty: bool,
 
     #[arg(last = true)]
     cmd_args: Vec<String>,
@@ -31,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env: vec![],
         namespace: vec![],
         fstab: vec![],
+        tty: args.tty,
     };
     // println!("{:?}", cmd);
     let sid = client.start(cmd).await?;

@@ -7,6 +7,7 @@ message P9cpuStartRequest {
     repeated string env = 3;
     repeated string fstab = 4;
     repeated string namespace = 5;
+    bool tty = 6;
 }
 
 message P9cpuStartResponse {

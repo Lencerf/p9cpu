@@ -16,6 +16,8 @@ thiserror = "1"
 anyhow = "1"
 tower = "0.4.13"
 clap = { version = "4.0.29", features = ["derive"] }
+libc = "0.2.138"
+nix = "0.26.1"
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["clap"]
