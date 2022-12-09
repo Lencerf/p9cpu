@@ -20,6 +20,7 @@ anyhow = "1"
 tower = "0.4.13"
 nix = "0.26.1"
 libc = "0.2.138"
+close_fds = "0.2"
 
 [build-dependencies]
 tonic-build = "0.8.4"

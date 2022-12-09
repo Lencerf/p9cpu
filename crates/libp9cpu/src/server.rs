@@ -103,8 +103,12 @@ pub enum P9cpuServerError {
     DuplicateId,
     #[error("Command exited without return code.")]
     NoReturnCode,
-    #[error("Command error {0}")]
+    #[error("Command error: {0}")]
     CommandError(std::io::Error),
+    #[error("Cannot open pty device")]
+    OpenPtyFail(nix::Error),
+    #[error("Cannot clone file descriptor: {0}")]
+    FdCloneFail(std::io::Error),
 }
 
 #[derive(Debug, Default)]
@@ -125,39 +129,38 @@ where
         Ok(op(info))
     }
 
-    fn make_cmd(&self, command: P9cpuCommand) -> (Command, Option<File>) {
+    fn make_cmd(&self, command: P9cpuCommand) -> Result<(Command, Option<File>), P9cpuServerError> {
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
         let pty_master = if command.tty {
-            let ptm_fd =
-                unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
-            unsafe {
-                libc::grantpt(ptm_fd);
-                libc::unlockpt(ptm_fd);
-            }
-            let mut buf: Vec<_> = vec![0; 100];
-            unsafe { libc::ptsname_r(ptm_fd, buf.as_mut_ptr() as *mut libc::c_char, 100) };
-            let pts_fd = unsafe { libc::open(buf.as_ptr() as *const libc::c_char, libc::O_RDWR) };
-            // let result = nix::pty::openpty(None, None)
-            //     .map_err(|e| Status::internal(format!("Cannot open tty: {:?}", e)))?;
-            cmd.stdin(unsafe { Stdio::from_raw_fd(pts_fd) })
-                .stdout(unsafe { Stdio::from_raw_fd(pts_fd) })
-                .stderr(unsafe { Stdio::from_raw_fd(pts_fd) });
+            let result =
+                nix::pty::openpty(None, None).map_err(|e| P9cpuServerError::OpenPtyFail(e))?;
+            let stdin = unsafe { std::fs::File::from_raw_fd(result.slave) };
+            let stdout = stdin
+                .try_clone()
+                .map_err(|e| P9cpuServerError::FdCloneFail(e))?;
+            let stderr = stdin
+                .try_clone()
+                .map_err(|e| P9cpuServerError::FdCloneFail(e))?;
+            // Stdio::
+            cmd.stdin(stdin).stdout(stdout).stderr(stderr);
             unsafe {
                 cmd.pre_exec(|| {
-                    nix::unistd::setsid().unwrap();
-                    libc::ioctl(0, libc::TIOCSCTTY);
-                    Result::Ok(())
+                    close_fds::set_fds_cloexec(3, &[]);
+                    nix::unistd::setsid()?;
+                    nix::ioctl_none_bad!(tiocsctty, libc::TIOCSCTTY);
+                    tiocsctty(0)?;
+                    Ok(())
                 });
             }
-            Some(unsafe { tokio::fs::File::from_raw_fd(ptm_fd) })
+            Some(unsafe { tokio::fs::File::from_raw_fd(result.master) })
         } else {
             cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             None
         };
-        (cmd, pty_master)
+        Ok((cmd, pty_master))
     }
 
     pub async fn start(&self, command: P9cpuCommand, sid: SID) -> Result<(), P9cpuServerError> {
@@ -165,7 +168,7 @@ where
         if sessions.contains_key(&sid) {
             return Err(P9cpuServerError::DuplicateId);
         }
-        let (mut cmd, pty_master) = self.make_cmd(command);
+        let (mut cmd, pty_master) = self.make_cmd(command)?;
         let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
         let (stdin, stdout, stderr) = if let Some(master) = pty_master {
             let c = master.try_clone().await.unwrap();

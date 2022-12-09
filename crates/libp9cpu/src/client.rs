@@ -3,7 +3,7 @@ use std::vec;
 
 use crate::rpc;
 use crate::AsBytes;
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use thiserror::Error;
@@ -122,7 +122,7 @@ where
             loop {
                 let mut buf = vec![0];
                 let mut stdin = tokio::io::stdin();
-                let Result::Ok(len) = tokio::select! {
+                let Ok(len) = tokio::select! {
                     len = stdin.read(&mut buf) => len,
                     _ = &mut stop_rx => break,
                 } else {
