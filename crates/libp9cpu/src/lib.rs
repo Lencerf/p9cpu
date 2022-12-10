@@ -2,6 +2,13 @@ pub mod client;
 pub mod rpc;
 pub mod server;
 
+#[derive(Debug)]
+pub enum Addr {
+    Tcp(std::net::SocketAddr),
+    Vsock(tokio_vsock::VsockAddr),
+    Uds(String),
+}
+
 pub trait AsBytes<'a> {
     fn as_bytes(&self) -> &[u8];
 }

@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use thiserror::Error;
-
-use tonic::transport::{Channel, Endpoint};
-use tonic::{Status, Streaming};
+use tokio_vsock::VsockStream;
 
 use crate::client::P9cpuCommand;
+use crate::Addr;
+use tokio::net::UnixStream;
+use tonic::transport::{Channel, Endpoint};
+use tonic::{Status, Streaming};
+use tower::service_fn;
 
 use super::PrependedStream;
 
@@ -29,8 +32,28 @@ pub struct RpcInner {
 }
 
 impl RpcInner {
-    pub async fn new(addr: &str) -> anyhow::Result<Self> {
-        let channel = Endpoint::from_shared(addr.to_string())?.connect().await?;
+    pub async fn new(addr: Addr) -> anyhow::Result<Self> {
+        let channel = match addr {
+            Addr::Uds(addr) => {
+                Endpoint::try_from("http://[::]:50051")?
+                    .connect_with_connector(service_fn(move |_| {
+                        // Connect to a Uds socket
+                        UnixStream::connect(addr.clone())
+                    }))
+                    .await?
+            }
+            Addr::Tcp(addr) => Endpoint::from_shared(addr.to_string())?.connect().await?,
+            Addr::Vsock(addr) => {
+                let cid = addr.cid();
+                let port = addr.port();
+                Endpoint::try_from("http://[::]:50051")?
+                    .connect_with_connector(service_fn(move |_| {
+                        // Connect to a Uds socket
+                        VsockStream::connect(cid, port)
+                    }))
+                    .await?
+            }
+        };
         let rpc_client = crate::rpc::p9cpu_client::P9cpuClient::new(channel.clone());
         Ok(Self {
             channel,

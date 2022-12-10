@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::vec;
 
+use crate::Addr;
 use crate::rpc;
 use crate::AsBytes;
 use anyhow::Result;
@@ -190,7 +191,7 @@ where
     }
 }
 
-pub async fn rpc_based(addr: &str) -> Result<P9cpuClient<rpc::rpc_client::RpcInner>> {
+pub async fn rpc_based(addr: Addr) -> Result<P9cpuClient<rpc::rpc_client::RpcInner>> {
     let inner = rpc::rpc_client::RpcInner::new(addr).await?;
     let client = P9cpuClient::new(inner).await?;
     Ok(client)

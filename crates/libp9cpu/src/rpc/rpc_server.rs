@@ -3,14 +3,17 @@ use super::{
     Empty, P9cpuBytes, P9cpuSessionId, P9cpuStartRequest, P9cpuStartResponse, P9cpuStdinRequest,
     P9cpuWaitResponse, PrependedStream,
 };
-use crate::server::P9cpuServerInner;
-use anyhow::Result;
-use futures::{Stream, TryFutureExt};
-use async_trait::async_trait;
-use std::fmt::Debug;
-use tonic::transport::Server;
 use crate::rpc::p9cpu_server;
+use crate::server::P9cpuServerInner;
+use crate::Addr;
+use anyhow::Result;
+use async_trait::async_trait;
+use futures::{Stream, TryFutureExt};
+use std::fmt::Debug;
 use std::pin::Pin;
+use std::task::Poll;
+use tokio_vsock::{VsockListener, VsockStream};
+use tonic::transport::Server;
 
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
@@ -19,28 +22,61 @@ use tonic::{Request, Response, Status, Streaming};
 type RpcResult<T> = Result<Response<T>, Status>;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
+
+struct VsockListenerStream {
+    listener: VsockListener,
+}
+
+impl Stream for VsockListenerStream {
+    type Item = std::io::Result<VsockStream>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.listener.poll_accept(cx) {
+            Poll::Ready(Ok((stream, _))) => Poll::Ready(Some(Ok(stream))),
+            Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 pub struct RpcServer {}
 
 #[async_trait]
 impl crate::server::P9cpuServerT for RpcServer {
-    async fn serve(&self, net: &str, addr: &str) -> Result<()> {
+    async fn serve(&self, addr: Addr) -> Result<()> {
         let p9cpu_service = p9cpu_server::P9cpuServer::new(P9cpuService::default());
         let router = Server::builder().add_service(p9cpu_service);
-        match net {
-            "tcp" => router.serve(addr.parse()?).await?,
-            "unix" => {
+        match addr {
+            Addr::Tcp(addr) => router.serve(addr).await?,
+            Addr::Uds(addr) => {
                 let uds = UnixListener::bind(addr)?;
                 let stream = UnixListenerStream::new(uds);
                 router.serve_with_incoming(stream).await?
             }
-            _ => {
-                unimplemented!()
+            Addr::Vsock(addr) => {
+                let listener = VsockListener::bind(addr.cid(), addr.port())?;
+                let stream = VsockListenerStream {listener};
+                router.serve_with_incoming(stream).await?
             }
         }
+        // match net {
+        //     "tcp" => router.serve(addr.parse()?).await?,
+        //     "unix" => {
+        //         let uds = UnixListener::bind(addr)?;
+        //         let stream = UnixListenerStream::new(uds);
+        //         router.serve_with_incoming(stream).await?
+        //     }
+        //     "vsock" => VsockListener::bind(cid, port),
+        //     _ => {
+        //         unimplemented!()
+        //     }
+        // }
         Ok(())
     }
 }
-
 
 #[derive(Debug, Default)]
 pub struct P9cpuService {

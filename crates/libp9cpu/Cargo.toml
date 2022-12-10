@@ -21,6 +21,8 @@ tower = "0.4.13"
 nix = "0.26.1"
 libc = "0.2.138"
 close_fds = "0.2"
+tokio-vsock = { path = "/usr/local/google/home/changyuanl/tokio-vsock", version = "0.3.3", features = ["tonic-conn"] }
+vsock = "0.3.0"
 
 [build-dependencies]
 tonic-build = "0.8.4"

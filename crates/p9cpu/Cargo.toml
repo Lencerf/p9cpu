@@ -16,6 +16,8 @@ thiserror = "1"
 anyhow = "1"
 tower = "0.4.13"
 clap = { version = "4.0.29", features = ["derive"] }
+tokio-vsock = { path = "/usr/local/google/home/changyuanl/tokio-vsock", version = "0.3.3", features = ["tonic-conn"] }
+vsock = "0.3.0"
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["clap"]

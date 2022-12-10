@@ -21,7 +21,7 @@ use tokio::{
 use crate::{client::P9cpuCommand, rpc, AsBytes, FromVecu8};
 #[async_trait]
 pub trait P9cpuServerT {
-    async fn serve(&self, net: &str, address: &str) -> Result<()>;
+    async fn serve(&self, addr: crate::Addr) -> Result<()>;
 }
 
 #[derive(Debug)]
