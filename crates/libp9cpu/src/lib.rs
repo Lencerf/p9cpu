@@ -1,6 +1,9 @@
 pub mod client;
 pub mod rpc;
 pub mod server;
+pub mod fstab;
+
+pub type P9cpuCommand = crate::rpc::P9cpuStartRequest;
 
 #[derive(Debug)]
 pub enum Addr {

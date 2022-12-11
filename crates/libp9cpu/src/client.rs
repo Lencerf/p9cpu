@@ -4,6 +4,7 @@ use std::vec;
 use crate::Addr;
 use crate::rpc;
 use crate::AsBytes;
+use crate::P9cpuCommand;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -12,8 +13,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
-
-pub type P9cpuCommand = crate::rpc::P9cpuStartRequest;
 
 #[async_trait]
 pub trait ClientInnerT {

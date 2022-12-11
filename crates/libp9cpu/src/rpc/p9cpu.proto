@@ -1,13 +1,23 @@
 syntax = "proto3";
 package p9cpu;
 
+message FsTab {
+    string spec = 1;
+    string file = 2;
+    string vfstype = 3;
+    string mntops = 4;
+    int32 freq = 5;
+    int32 passno = 6;
+}
+
 message P9cpuStartRequest {
     string program = 1;
     repeated string args = 2;
     repeated string env = 3;
-    repeated string fstab = 4;
+    repeated FsTab fstab = 4;
     repeated string namespace = 5;
     bool tty = 6;
+    optional string tmp_mnt = 7;
 }
 
 message P9cpuStartResponse {

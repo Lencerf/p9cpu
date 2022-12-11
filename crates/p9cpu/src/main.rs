@@ -1,8 +1,7 @@
-use std::{collections::VecDeque, vec};
-
-use libp9cpu::client::P9cpuCommand;
+use libp9cpu::{fstab::FsTab, P9cpuCommand};
 
 use clap::Parser;
+use tokio::io::AsyncBufReadExt;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Net {
@@ -24,6 +23,12 @@ struct Args {
     #[arg(long, default_value_t = 11200)]
     port: u32,
 
+    #[arg(long)]
+    fs_tab: Option<String>,
+
+    #[arg(long, default_value = "cputmp")]
+    tmp_mnt: String,
+
     #[arg(last = true)]
     host_and_args: Vec<String>,
 }
@@ -36,19 +41,38 @@ async fn app() -> Result<(), Box<dyn std::error::Error>> {
     }
     let host = &args.host_and_args[0];
     let addr = match args.net {
-        Net::Vsock => libp9cpu::Addr::Vsock(tokio_vsock::VsockAddr::new(host.parse().unwrap(), args.port)),
+        Net::Vsock => libp9cpu::Addr::Vsock(tokio_vsock::VsockAddr::new(
+            host.parse().unwrap(),
+            args.port,
+        )),
         Net::Unix => libp9cpu::Addr::Uds(host.to_owned()),
         Net::Tcp => libp9cpu::Addr::Tcp(format!("{}:{}", host, args.port).parse().unwrap()),
     };
-
+    let mut fs_tab_lines = vec![];
+    if let Some(ref fs_tab) = args.fs_tab {
+        let fs_tab_file = tokio::fs::File::open(fs_tab).await?;
+        let mut lines = tokio::io::BufReader::new(fs_tab_file).lines();
+        while let Some(line) = lines.next_line().await? {
+            if line.starts_with("#") {
+                continue;
+            }
+            fs_tab_lines.push(FsTab::try_from(line.as_str())?);
+        }
+    }
     let mut client = libp9cpu::client::rpc_based(addr).await?;
+
     let cmd = P9cpuCommand {
         program: args.host_and_args[1].clone(),
         args: args.host_and_args[2..].to_vec(),
         env: vec![],
         namespace: vec![],
-        fstab: vec![],
+        fstab: fs_tab_lines,
         tty: args.tty,
+        tmp_mnt: if args.tmp_mnt.len() > 0 {
+            Some(args.tmp_mnt)
+        } else {
+            None
+        },
     };
     client.start(cmd).await?;
     client.wait().await?;

@@ -3,7 +3,7 @@ use futures::{Stream, StreamExt};
 use thiserror::Error;
 use tokio_vsock::VsockStream;
 
-use crate::client::P9cpuCommand;
+use crate::P9cpuCommand;
 use crate::Addr;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
@@ -42,7 +42,11 @@ impl RpcInner {
                     }))
                     .await?
             }
-            Addr::Tcp(addr) => Endpoint::from_shared(addr.to_string())?.connect().await?,
+            Addr::Tcp(addr) => {
+                Endpoint::from_shared(format!("http://{}:{}", addr.ip(), addr.port()))?
+                    .connect()
+                    .await?
+            }
             Addr::Vsock(addr) => {
                 let cid = addr.cid();
                 let port = addr.port();

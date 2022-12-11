@@ -1,6 +1,5 @@
 use anyhow::{Ok, Result};
 use libp9cpu::server::P9cpuServerT;
-use std::net::{SocketAddr, SocketAddrV6};
 
 use clap::Parser;
 
@@ -18,8 +17,8 @@ struct Args {
     net: Net,
     #[arg(long, default_value_t = 11200)]
     port: u32,
-    #[arg(long, default_value = "")]
-    uds: String,
+    #[arg(long)]
+    uds: Option<String>,
 
     #[arg(last = true)]
     cmd_args: Vec<String>,
@@ -35,7 +34,7 @@ async fn main() -> Result<()> {
             args.port,
         )),
         Net::Tcp => libp9cpu::Addr::Tcp(format!("[::]:{}", args.port).parse().unwrap()),
-        Net::Unix => libp9cpu::Addr::Uds(args.uds),
+        Net::Unix => libp9cpu::Addr::Uds(args.uds.unwrap()),
     };
     server.serve(addr).await?;
     Ok(())

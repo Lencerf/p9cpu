@@ -18,7 +18,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{client::P9cpuCommand, rpc, AsBytes, FromVecu8};
+use crate::{rpc, AsBytes, FromVecu8, fstab::FsTab, P9cpuCommand};
 #[async_trait]
 pub trait P9cpuServerT {
     async fn serve(&self, addr: crate::Addr) -> Result<()>;
@@ -109,6 +109,54 @@ pub enum P9cpuServerError {
     OpenPtyFail(nix::Error),
     #[error("Cannot clone file descriptor: {0}")]
     FdCloneFail(std::io::Error),
+    #[error("Cannot create directory: {0}")]
+    MkDir(std::io::Error),
+    #[error("Invalid FsTab: {0}")]
+    InvalidFsTab(String),
+}
+
+fn parse_fstab_opt(opt: &str) -> (nix::mount::MsFlags, String) {
+    let mut opts = vec![];
+    let mut flag = nix::mount::MsFlags::empty();
+    for f in opt.split(',') {
+        if f == "defaults" {
+            continue;
+        }
+        if f == "bind" {
+            flag |= nix::mount::MsFlags::MS_BIND;
+        } else {
+            opts.push(f);
+        }
+    }
+    return (flag, opts.join(","));
+}
+
+fn parse_fstab_line(tab: FsTab) -> Result<MountParams, P9cpuServerError> {
+    let FsTab {
+        spec: source,
+        file: target,
+        vfstype: fstype,
+        mntops: opt,
+        freq: _,
+        passno: _,
+    } = tab;
+    let (flags, data) = parse_fstab_opt(&opt);
+    Ok(MountParams {
+        source: Some(source),
+        target,
+        fstype: Some(fstype),
+        flags,
+        // data: if data.len() == 0 { None } else { Some(data) },
+        data: Some(data),
+    })
+}
+
+struct MountParams {
+    source: Option<String>,
+    target: String,
+    fstype: Option<String>,
+    flags: nix::mount::MsFlags,
+    data: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -132,6 +180,49 @@ where
     fn make_cmd(&self, command: P9cpuCommand) -> Result<(Command, Option<File>), P9cpuServerError> {
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
+        if let Some(tmp_mnt) = command.tmp_mnt {
+            std::fs::create_dir_all(&tmp_mnt).map_err(|e| P9cpuServerError::MkDir(e))?;
+            let mut mount_params = vec![];
+            for line in command.fstab {
+                mount_params.push(parse_fstab_line(line)?);
+            }
+            // let mount_params:Vec<_> = command.fstab.into_iter().map(|tab| parse_fstab_line(tab)).try_collect()?;
+            let mount_fstab = move || {
+                // std/src/sys/unix/process/process_unix.rs
+                use nix::mount::{mount, MsFlags};
+                use nix::sched::{unshare, CloneFlags};
+                unshare(CloneFlags::CLONE_NEWNS)?;
+                // https://go-review.git.corp.google.com/c/go/+/38471
+                mount(
+                    Option::<&str>::None,
+                    "/",
+                    Option::<&str>::None,
+                    MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                    Option::<&str>::None,
+                )?;
+                mount(
+                    Some("p9cpu"),
+                    tmp_mnt.as_bytes(),
+                    Some("tmpfs"),
+                    MsFlags::empty(),
+                    Option::<&str>::None,
+                )?;
+                for param in &mount_params {
+                    std::fs::create_dir_all(&param.target)?;
+                    mount(
+                        param.source.as_deref(),
+                        param.target.as_str(),
+                        param.fstype.as_deref(),
+                        param.flags,
+                        param.data.as_deref(),
+                    )?;
+                }
+                std::io::Result::Ok(())
+            };
+            unsafe {
+                cmd.pre_exec(mount_fstab);
+            }
+        }
         let pty_master = if command.tty {
             let result =
                 nix::pty::openpty(None, None).map_err(|e| P9cpuServerError::OpenPtyFail(e))?;
