@@ -3,8 +3,9 @@ use futures::{Stream, StreamExt};
 use thiserror::Error;
 use tokio_vsock::VsockStream;
 
-use crate::P9cpuCommand;
+use crate::rpc::{Empty, StartRequest};
 use crate::Addr;
+use crate::P9cpuCommand;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Status, Streaming};
@@ -70,16 +71,34 @@ impl RpcInner {
 impl crate::client::ClientInnerT for RpcInner {
     type Error = RpcInnerError;
     type SessionId = uuid::Uuid;
-    async fn start(&mut self, command: P9cpuCommand) -> Result<Self::SessionId, Self::Error> {
+    async fn dial(&mut self) -> Result<Self::SessionId, Self::Error> {
         let id_vec = self
             .rpc_client
-            .start(command)
+            .dial(Empty {})
             .await
             .map_err(RpcInnerError::Rpc)?
             .into_inner()
             .id;
         let sid = uuid::Uuid::from_slice(&id_vec).map_err(RpcInnerError::InvalidUuid)?;
         Ok(sid)
+    }
+
+    async fn start(
+        &mut self,
+        sid: Self::SessionId,
+        command: P9cpuCommand,
+    ) -> Result<(), Self::Error> {
+        let req = StartRequest {
+            id: sid.into_bytes().into(),
+            cmd: Some(command),
+        };
+        self
+            .rpc_client
+            .start(req)
+            .await
+            .map_err(RpcInnerError::Rpc)?
+            .into_inner();
+        Ok(())
     }
 
     async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error> {
@@ -128,6 +147,30 @@ impl crate::client::ClientInnerT for RpcInner {
             .await
             .map_err(RpcInnerError::Rpc)?;
         Ok(())
+    }
+
+    type NinepInStreamItem = crate::rpc::NinepForwardRequest;
+    type NinepOutStream = Streaming<crate::rpc::P9cpuBytes>;
+    async fn ninep_forward(
+        &mut self,
+        sid: Self::SessionId,
+        mut in_stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
+    ) -> Result<Self::NinepOutStream, Self::Error> {
+        let Some(mut first_req) = in_stream.next().await else {
+            return Err(RpcInnerError::AlreadyStarted);
+        };
+        first_req.id = Some(sid.into_bytes().into());
+        let stream = PrependedStream {
+            stream: in_stream,
+            item: Some(first_req),
+        };
+        let out_stream = self
+            .rpc_client
+            .ninep_forward(stream)
+            .await
+            .unwrap()
+            .into_inner();
+        Ok(out_stream)
     }
 
     fn side_channel(&mut self) -> Self {

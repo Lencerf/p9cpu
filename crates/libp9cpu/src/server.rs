@@ -1,6 +1,11 @@
 use std::{
-    collections::HashMap, fmt::Debug, hash::Hash, os::unix::prelude::FromRawFd, pin::Pin,
-    process::Stdio, sync::Arc,
+    collections::HashMap,
+    fmt::{format, Debug},
+    hash::Hash,
+    os::unix::prelude::FromRawFd,
+    pin::Pin,
+    process::Stdio,
+    sync::Arc,
 };
 
 use anyhow::Result;
@@ -18,7 +23,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{rpc, AsBytes, FromVecu8, fstab::FsTab, P9cpuCommand};
+use crate::{fstab::FsTab, rpc, AsBytes, FromVecu8, P9cpuCommand};
 #[async_trait]
 pub trait P9cpuServerT {
     async fn serve(&self, addr: crate::Addr) -> Result<()>;
@@ -88,7 +93,13 @@ pub struct Session {
     stdout: Arc<RwLock<StdoutReader>>,
     stderr: Arc<RwLock<Option<ChildStderr>>>,
     child: Arc<RwLock<Child>>,
+    ninep_port: Arc<RwLock<Option<u16>>>,
     handles: Arc<RwLock<Vec<JoinHandle<()>>>>,
+}
+
+#[derive(Debug)]
+pub struct PendingSession {
+    ninep: Arc<RwLock<Option<(u16, JoinHandle<()>)>>>,
 }
 
 #[derive(Error, Debug)]
@@ -113,6 +124,10 @@ pub enum P9cpuServerError {
     MkDir(std::io::Error),
     #[error("Invalid FsTab: {0}")]
     InvalidFsTab(String),
+    #[error("Cannot bind listener")]
+    BindFail,
+    #[error("9p forward not setup")]
+    No9pPort,
 }
 
 fn parse_fstab_opt(opt: &str) -> (nix::mount::MsFlags, String) {
@@ -162,6 +177,103 @@ struct MountParams {
 #[derive(Debug, Default)]
 pub struct P9cpuServerInner<I> {
     sessions: Arc<RwLock<HashMap<I, Session>>>,
+    pending: Arc<RwLock<HashMap<I, PendingSession>>>,
+}
+
+fn create_tmp_mnt(cmd: &mut Command, tmp_mnt: String) -> Result<(), P9cpuServerError> {
+    std::fs::create_dir_all(&tmp_mnt).map_err(|e| P9cpuServerError::MkDir(e))?;
+    let op = move || {
+        // std/src/sys/unix/process/process_unix.rs
+        use nix::mount::{mount, MsFlags};
+        use nix::sched::{unshare, CloneFlags};
+        unshare(CloneFlags::CLONE_NEWNS)?;
+        // https://go-review.git.corp.google.com/c/go/+/38471
+        mount(
+            Option::<&str>::None,
+            "/",
+            Option::<&str>::None,
+            MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+            Option::<&str>::None,
+        )?;
+        mount(
+            Some("p9cpu"),
+            tmp_mnt.as_str(),
+            Some("tmpfs"),
+            MsFlags::empty(),
+            Option::<&str>::None,
+        )?;
+        Ok(())
+    };
+    unsafe {
+        cmd.pre_exec(op);
+    }
+    Ok(())
+}
+
+fn cmd_mount_fstab(cmd: &mut Command, fstab: Vec<FsTab>) -> Result<(), P9cpuServerError> {
+    let mut mount_params = vec![];
+    for tab in fstab {
+        mount_params.push(parse_fstab_line(tab)?);
+    }
+    let mount_fstab = move || {
+        for param in &mount_params {
+            std::fs::create_dir_all(&param.target)?;
+            nix::mount::mount(
+                param.source.as_deref(),
+                param.target.as_str(),
+                param.fstype.as_deref(),
+                param.flags,
+                param.data.as_deref(),
+            )?;
+        }
+        Ok(())
+    };
+    unsafe {
+        cmd.pre_exec(mount_fstab);
+    }
+    Ok(())
+}
+
+fn cmd_mount_namespace(
+    cmd: &mut Command,
+    namespace: HashMap<String, String>,
+    tmp_mnt: String,
+    ninep_port: u16,
+) {
+    let op = move || {
+        use nix::mount::{mount, MsFlags};
+        let ninep_mount = format!("{}/mnt9p", &tmp_mnt);
+        let ninep_opt = format!(
+            "version=9p2000.L,trans=tcp,port={},uname=changyuanl",
+            ninep_port
+        );
+        std::fs::create_dir_all(&ninep_mount)?;
+        mount(
+            Some("localhost"),
+            ninep_mount.as_str(),
+            Some("9p"),
+            MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+            Some(ninep_opt).as_deref(),
+        )?;
+        for (target, mut source) in namespace.iter() {
+            std::fs::create_dir_all(target)?;
+            if source.is_empty() {
+                source = target;
+            }
+            let local_source = format!("{}{}", &ninep_mount, source);
+            mount(
+                Some(local_source).as_deref(),
+                target.as_str(),
+                Option::<&str>::None,
+                MsFlags::MS_BIND,
+                Option::<&str>::None,
+            )?;
+        }
+        Ok(())
+    };
+    unsafe {
+        cmd.pre_exec(op);
+    }
 }
 
 impl<SID> P9cpuServerInner<SID>
@@ -177,51 +289,18 @@ where
         Ok(op(info))
     }
 
-    fn make_cmd(&self, command: P9cpuCommand) -> Result<(Command, Option<File>), P9cpuServerError> {
+    fn make_cmd(&self, command: P9cpuCommand, ninep_port: Option<u16>) -> Result<(Command, Option<File>), P9cpuServerError> {
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
         if let Some(tmp_mnt) = command.tmp_mnt {
-            std::fs::create_dir_all(&tmp_mnt).map_err(|e| P9cpuServerError::MkDir(e))?;
-            let mut mount_params = vec![];
-            for line in command.fstab {
-                mount_params.push(parse_fstab_line(line)?);
+            create_tmp_mnt(&mut cmd, tmp_mnt.clone())?;
+            if !command.namespace.is_empty() {
+                let Some(ninep_port) = ninep_port else {
+                    return Err(P9cpuServerError::No9pPort);
+                };
+                cmd_mount_namespace(&mut cmd, command.namespace, tmp_mnt, ninep_port);
             }
-            // let mount_params:Vec<_> = command.fstab.into_iter().map(|tab| parse_fstab_line(tab)).try_collect()?;
-            let mount_fstab = move || {
-                // std/src/sys/unix/process/process_unix.rs
-                use nix::mount::{mount, MsFlags};
-                use nix::sched::{unshare, CloneFlags};
-                unshare(CloneFlags::CLONE_NEWNS)?;
-                // https://go-review.git.corp.google.com/c/go/+/38471
-                mount(
-                    Option::<&str>::None,
-                    "/",
-                    Option::<&str>::None,
-                    MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-                    Option::<&str>::None,
-                )?;
-                mount(
-                    Some("p9cpu"),
-                    tmp_mnt.as_bytes(),
-                    Some("tmpfs"),
-                    MsFlags::empty(),
-                    Option::<&str>::None,
-                )?;
-                for param in &mount_params {
-                    std::fs::create_dir_all(&param.target)?;
-                    mount(
-                        param.source.as_deref(),
-                        param.target.as_str(),
-                        param.fstype.as_deref(),
-                        param.flags,
-                        param.data.as_deref(),
-                    )?;
-                }
-                std::io::Result::Ok(())
-            };
-            unsafe {
-                cmd.pre_exec(mount_fstab);
-            }
+            cmd_mount_fstab(&mut cmd, command.fstab)?;
         }
         let pty_master = if command.tty {
             let result =
@@ -237,7 +316,6 @@ where
             cmd.stdin(stdin).stdout(stdout).stderr(stderr);
             unsafe {
                 cmd.pre_exec(|| {
-                    close_fds::set_fds_cloexec(3, &[]);
                     nix::unistd::setsid()?;
                     nix::ioctl_none_bad!(tiocsctty, libc::TIOCSCTTY);
                     tiocsctty(0)?;
@@ -251,15 +329,42 @@ where
                 .stderr(Stdio::piped());
             None
         };
+        unsafe {
+            cmd.pre_exec(|| {
+                close_fds::set_fds_cloexec(3, &[]);
+                Ok(())
+            });
+        }
         Ok((cmd, pty_master))
     }
 
+    pub async fn dial(&self, sid: SID) -> Result<(), P9cpuServerError> {
+        let mut pending = self.pending.write().await;
+        if pending.contains_key(&sid) {
+            return Err(P9cpuServerError::DuplicateId);
+        }
+        let session = PendingSession {
+            ninep: Arc::new(RwLock::new(None)),
+        };
+        pending.insert(sid, session);
+        Ok(())
+    }
+
     pub async fn start(&self, command: P9cpuCommand, sid: SID) -> Result<(), P9cpuServerError> {
+        let Some(PendingSession { ninep }) = self.pending.write().await.remove(&sid) else {
+            return Err(P9cpuServerError::SessionNotExist);
+        };
         let mut sessions = self.sessions.write().await;
         if sessions.contains_key(&sid) {
             return Err(P9cpuServerError::DuplicateId);
         }
-        let (mut cmd, pty_master) = self.make_cmd(command)?;
+        let mut handles = vec![];
+        let mut ninep_port = None;
+        if let Some((port, handle)) = ninep.write().await.take() {
+            ninep_port = Some(port);
+            handles.push(handle);
+        }
+        let (mut cmd, pty_master) = self.make_cmd(command, ninep_port)?;
         let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
         let (stdin, stdout, stderr) = if let Some(master) = pty_master {
             let c = master.try_clone().await.unwrap();
@@ -279,7 +384,8 @@ where
             stdout: Arc::new(RwLock::new(stdout)),
             stderr: Arc::new(RwLock::new(stderr)),
             child: Arc::new(RwLock::new(child)),
-            handles: Arc::new(RwLock::new(Vec::new())),
+            ninep_port: Arc::new(RwLock::new(None)),
+            handles: Arc::new(RwLock::new(handles)),
         };
         sessions.insert(sid, info);
         Ok(())
@@ -335,6 +441,58 @@ where
         });
         let handles = self.get_session(sid, |s| s.handles.clone()).await?;
         handles.write().await.push(err_handle);
+        Ok(rx)
+    }
+
+    pub async fn ninep_forward<'a, IS, IItem, OItem>(
+        &self,
+        sid: &SID,
+        mut in_stream: IS,
+    ) -> Result<Receiver<OItem>, P9cpuServerError>
+    where
+        OItem: FromVecu8 + Debug + Send + Sync + 'static,
+        IS: Stream<Item = IItem> + Unpin + Send + 'static,
+        IItem: AsBytes<'a> + Send + Sync,
+    {
+        let pending = self.pending.write().await;
+        let session = pending.get(&sid).ok_or(P9cpuServerError::SessionNotExist)?;
+        let listener = tokio::net::TcpListener::bind("[::1]:0")
+            .await
+            .map_err(|_| P9cpuServerError::BindFail)?;
+        let port = listener
+            .local_addr()
+            .map(|addr| addr.port())
+            .map_err(|_| P9cpuServerError::BindFail)?;
+        let (tx, rx) = mpsc::channel(1);
+        let handle = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (mut reader, mut writer) = stream.split();
+            loop {
+                let mut buf = vec![0; 128];
+                tokio::select! {
+                    len = reader.read(&mut buf) => {
+                        let Ok(len) = len else { break };
+                        if len == 0 {
+                            break;
+                        }
+                        let item = OItem::from_vec_u8(buf[0..len].to_vec());
+                        if tx.send(item).await.is_err() {
+                            break;
+                        }
+                    }
+                    in_item = in_stream.next() => {
+                        let Some(in_item) = in_item else {break};
+                        let Ok(len) = writer.write(in_item.as_bytes()).await else { break };
+                        if len == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        *session.ninep.write().await = Some((port, handle));
         Ok(rx)
     }
 

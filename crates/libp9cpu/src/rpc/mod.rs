@@ -11,21 +11,33 @@ pub mod rpc_server;
 
 tonic::include_proto!("p9cpu");
 
-impl AsBytes<'_> for Result<P9cpuBytes, Status> {
+impl<'a, T, E> AsBytes<'a> for Result<T, E>
+where
+    T: AsBytes<'a>,
+{
     fn as_bytes(&self) -> &[u8] {
         match self {
-            Ok(bytes) => bytes.data.as_slice(),
-            Err(_e) => &[],
+            Ok(data) => data.as_bytes(),
+            Err(_) => &[],
         }
     }
 }
 
-impl AsBytes<'_> for Result<P9cpuStdinRequest, Status> {
+impl AsBytes<'_> for P9cpuBytes {
     fn as_bytes(&self) -> &[u8] {
-        match self {
-            Ok(req) => req.data.as_slice(),
-            Err(_e) => &[],
-        }
+        self.data.as_slice()
+    }
+}
+
+impl AsBytes<'_> for P9cpuStdinRequest {
+    fn as_bytes(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+}
+
+impl AsBytes<'_> for NinepForwardRequest {
+    fn as_bytes(&self) -> &[u8] {
+        self.data.as_slice()
     }
 }
 

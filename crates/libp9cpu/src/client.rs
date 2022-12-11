@@ -1,8 +1,8 @@
 use std::fmt::Debug;
 use std::vec;
 
-use crate::Addr;
 use crate::rpc;
+use crate::Addr;
 use crate::AsBytes;
 use crate::P9cpuCommand;
 use anyhow::Result;
@@ -18,11 +18,18 @@ use tokio_stream::wrappers::ReceiverStream;
 pub trait ClientInnerT {
     type Error;
     type SessionId;
-    async fn start(&mut self, command: P9cpuCommand) -> Result<Self::SessionId, Self::Error>;
+    async fn dial(&mut self) -> Result<Self::SessionId, Self::Error>;
+    async fn start(
+        &mut self,
+        sid: Self::SessionId,
+        command: P9cpuCommand,
+    ) -> Result<(), Self::Error>;
 
     async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
 
     type OutStream;
+    // https://github.com/rust-lang/rust/issues/29661
+    // type StderrStream = Self::OutStream;
     async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
     async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
 
@@ -32,6 +39,14 @@ pub trait ClientInnerT {
         sid: Self::SessionId,
         stream: impl Stream<Item = Self::InStreamItem> + Send + Sync + 'static + Unpin,
     ) -> Result<(), Self::Error>;
+
+    type NinepInStreamItem;
+    type NinepOutStream;
+    async fn ninep_forward(
+        &mut self,
+        sid: Self::SessionId,
+        stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
+    ) -> Result<Self::NinepOutStream, Self::Error>;
 
     fn side_channel(&mut self) -> Self;
 }
@@ -82,6 +97,7 @@ where
                 if let Err(_e) = stdin_channel.stdin(sid, in_stream).await {}
             }
         });
+        // let (ninep_tx, mut ninep_rx) = mpsc::channel(buffer)
         Ok(Self {
             stdin_tx,
             inner,
@@ -94,7 +110,11 @@ where
             return Err(P9cpuClientError::AlreadyStarted)?;
         }
         let tty = command.tty;
-        let sid = self.inner.start(command).await?;
+        let sid = self.inner.dial().await?;
+        if !command.namespace.is_empty() {
+            // letself.inner.ninep_forward(sid.clone(), stream);
+        }
+        self.inner.start(sid.clone(), command).await?;
         let mut out_stream = self.inner.stdout(sid.clone()).await?;
         let out_handle = tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();

@@ -1,7 +1,7 @@
 use super::p9cpu_server::P9cpu;
 use super::{
-    Empty, P9cpuBytes, P9cpuSessionId, P9cpuStartRequest, P9cpuStartResponse, P9cpuStdinRequest,
-    P9cpuWaitResponse, PrependedStream,
+    Empty, NinepForwardRequest, P9cpuBytes, P9cpuSessionId, P9cpuStdinRequest, P9cpuWaitResponse,
+    PrependedStream, StartRequest,
 };
 use crate::rpc::p9cpu_server;
 use crate::server::P9cpuServerInner;
@@ -58,7 +58,7 @@ impl crate::server::P9cpuServerT for RpcServer {
             }
             Addr::Vsock(addr) => {
                 let listener = VsockListener::bind(addr.cid(), addr.port())?;
-                let stream = VsockListenerStream {listener};
+                let stream = VsockListenerStream { listener };
                 router.serve_with_incoming(stream).await?
             }
         }
@@ -91,19 +91,21 @@ fn vec_to_uuid(v: &Vec<u8>) -> Result<uuid::Uuid, Status> {
 impl P9cpu for P9cpuService {
     type StdoutStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
     type StderrStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
+    type NinepForwardStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
 
-    async fn start(&self, request: Request<P9cpuStartRequest>) -> RpcResult<P9cpuStartResponse> {
-        let req = request.into_inner();
-        let sid = uuid::Uuid::new_v4();
-        self.inner
-            .start(req, sid)
-            .map_err(|e| Status::internal(e.to_string()))
-            .await?;
-        let r = P9cpuStartResponse {
-            id: sid.into_bytes().into(),
+    async fn start(&self, request: Request<StartRequest>) -> RpcResult<Empty> {
+        let StartRequest { id, cmd: Some(cmd) } = request.into_inner() else {
+            return Err(Status::invalid_argument("No cmd provided."));
         };
-        Ok(Response::new(r))
+        let sid = vec_to_uuid(&id)?;
+        // let Some(cmd) = request.
+        self.inner
+            .start(cmd, sid)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(Empty {}))
     }
+
     async fn stdin(&self, request: Request<Streaming<P9cpuStdinRequest>>) -> RpcResult<Empty> {
         let mut in_stream = request.into_inner();
         let Some(Ok(P9cpuStdinRequest { id: Some(id), data })) = in_stream.next().await else {
@@ -141,6 +143,42 @@ impl P9cpu for P9cpuService {
             .map_err(|e| Status::internal(e.to_string()))?;
         let err_stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(err_stream) as Self::StderrStream))
+    }
+
+    async fn dial(&self, _: Request<Empty>) -> RpcResult<P9cpuSessionId> {
+        let sid = uuid::Uuid::new_v4();
+        self.inner
+            .dial(sid)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let r = P9cpuSessionId {
+            id: sid.into_bytes().into(),
+        };
+        Ok(Response::new(r))
+    }
+
+    async fn ninep_forward(
+        &self,
+        request: Request<Streaming<NinepForwardRequest>>,
+    ) -> RpcResult<Self::NinepForwardStream> {
+        let mut in_stream = request.into_inner();
+        let Some(Ok(NinepForwardRequest { id: Some(id), data })) = in_stream.next().await else {
+            return Err(Status::invalid_argument("no session id."));
+        };
+        let sid = vec_to_uuid(&id)?;
+        let stream = PrependedStream {
+            stream: in_stream,
+            item: Some(Ok(NinepForwardRequest { id: None, data })),
+        };
+        let rx = self
+            .inner
+            .ninep_forward(&sid, stream)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let ninep_stream = ReceiverStream::new(rx);
+        Ok(Response::new(
+            Box::pin(ninep_stream) as Self::NinepForwardStream
+        ))
     }
 
     async fn wait(&self, request: Request<P9cpuSessionId>) -> RpcResult<P9cpuWaitResponse> {
