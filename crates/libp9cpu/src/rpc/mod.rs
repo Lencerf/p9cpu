@@ -4,7 +4,7 @@ use futures::Stream;
 
 use tonic::Status;
 
-use crate::{AsBytes, FromVecu8};
+use crate::{AsBytes, FromVecu8, IntoByteVec};
 
 pub mod rpc_client;
 pub mod rpc_server;
@@ -47,9 +47,33 @@ impl From<Vec<u8>> for P9cpuStdinRequest {
     }
 }
 
+impl From<Vec<u8>> for NinepForwardRequest {
+    fn from(data: Vec<u8>) -> Self {
+        NinepForwardRequest { id: None, data }
+    }
+}
+
 impl FromVecu8 for Result<P9cpuBytes, Status> {
     fn from_vec_u8(vec: Vec<u8>) -> Self {
         Ok(P9cpuBytes { data: vec })
+    }
+}
+
+impl<T, E> IntoByteVec for Result<T, E>
+where
+    T: IntoByteVec,
+{
+    fn into_byte_vec(self) -> Vec<u8> {
+        match self {
+            Ok(inner) => inner.into_byte_vec(),
+            Err(_) => vec![],
+        }
+    }
+}
+
+impl IntoByteVec for P9cpuBytes {
+    fn into_byte_vec(self) -> Vec<u8> {
+        self.data
     }
 }
 

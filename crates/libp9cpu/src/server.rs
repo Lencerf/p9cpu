@@ -1,11 +1,6 @@
 use std::{
-    collections::HashMap,
-    fmt::{format, Debug},
-    hash::Hash,
-    os::unix::prelude::FromRawFd,
-    pin::Pin,
-    process::Stdio,
-    sync::Arc,
+    collections::HashMap, fmt::Debug, hash::Hash, os::unix::prelude::FromRawFd, pin::Pin,
+    process::Stdio, sync::Arc,
 };
 
 use anyhow::Result;
@@ -289,7 +284,11 @@ where
         Ok(op(info))
     }
 
-    fn make_cmd(&self, command: P9cpuCommand, ninep_port: Option<u16>) -> Result<(Command, Option<File>), P9cpuServerError> {
+    fn make_cmd(
+        &self,
+        command: P9cpuCommand,
+        ninep_port: Option<u16>,
+    ) -> Result<(Command, Option<File>), P9cpuServerError> {
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
         if let Some(tmp_mnt) = command.tmp_mnt {

@@ -92,8 +92,7 @@ impl crate::client::ClientInnerT for RpcInner {
             id: sid.into_bytes().into(),
             cmd: Some(command),
         };
-        self
-            .rpc_client
+        self.rpc_client
             .start(req)
             .await
             .map_err(RpcInnerError::Rpc)?
@@ -154,12 +153,12 @@ impl crate::client::ClientInnerT for RpcInner {
     async fn ninep_forward(
         &mut self,
         sid: Self::SessionId,
-        mut in_stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
+        in_stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
     ) -> Result<Self::NinepOutStream, Self::Error> {
-        let Some(mut first_req) = in_stream.next().await else {
-            return Err(RpcInnerError::AlreadyStarted);
+        let first_req = crate::rpc::NinepForwardRequest {
+            id: Some(sid.into_bytes().into()),
+            data: vec![],
         };
-        first_req.id = Some(sid.into_bytes().into());
         let stream = PrependedStream {
             stream: in_stream,
             item: Some(first_req),

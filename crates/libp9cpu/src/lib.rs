@@ -1,7 +1,7 @@
 pub mod client;
+pub mod fstab;
 pub mod rpc;
 pub mod server;
-pub mod fstab;
 
 pub type P9cpuCommand = crate::rpc::P9cpuCommand;
 
@@ -18,4 +18,8 @@ pub trait AsBytes<'a> {
 
 pub trait FromVecu8 {
     fn from_vec_u8(vec: Vec<u8>) -> Self;
+}
+
+pub trait IntoByteVec {
+    fn into_byte_vec(self) -> Vec<u8>;
 }

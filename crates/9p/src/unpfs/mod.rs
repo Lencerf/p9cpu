@@ -1,11 +1,11 @@
 use {
-    async_trait::async_trait,
-    filetime::FileTime,
-    nix::libc::{O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY},
     crate::{
         srv::{srv_async, Fid, Filesystem},
         *,
     },
+    async_trait::async_trait,
+    filetime::FileTime,
+    nix::libc::{O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY},
     std::{
         io::SeekFrom,
         os::unix::{fs::PermissionsExt, io::FromRawFd},
@@ -52,7 +52,9 @@ pub struct Unpfs {
 
 impl Unpfs {
     pub fn new(root: &Path) -> Self {
-        Unpfs { realroot: root.to_path_buf() }
+        Unpfs {
+            realroot: root.to_path_buf(),
+        }
     }
 }
 
@@ -398,7 +400,7 @@ impl Filesystem for Unpfs {
     }
 }
 
-async fn unpfs_main(args: Vec<String>) -> crate::Result<i32> {
+async fn _unpfs_main(args: Vec<String>) -> crate::Result<i32> {
     if args.len() < 3 {
         eprintln!("Usage: {} proto!address!port mountpoint", args[0]);
         eprintln!("  where: proto = tcp | unix");
@@ -421,11 +423,11 @@ async fn unpfs_main(args: Vec<String>) -> crate::Result<i32> {
     .and(Ok(0))
 }
 
-async fn original_main() {
+async fn _original_main() {
     // env_logger::init();
 
     let args = std::env::args().collect();
-    let exit_code = unpfs_main(args).await.unwrap_or_else(|e| {
+    let exit_code = _unpfs_main(args).await.unwrap_or_else(|e| {
         eprintln!("Error: {:?}", e);
         -1
     });

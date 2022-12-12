@@ -2,7 +2,8 @@
 members = [
     "crates/p9cpu",
     "crates/p9cpud",
-    "crates/libp9cpu"
+    "crates/libp9cpu",
+    "crates/9p",
 ]
 
 [profile.release]

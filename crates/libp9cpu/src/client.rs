@@ -1,14 +1,18 @@
 use std::fmt::Debug;
+use std::path::Path;
+use std::pin::Pin;
 use std::vec;
 
 use crate::rpc;
 use crate::Addr;
-use crate::AsBytes;
 use crate::P9cpuCommand;
+use crate::{AsBytes, IntoByteVec};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use thiserror::Error;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -51,6 +55,146 @@ pub trait ClientInnerT {
     fn side_channel(&mut self) -> Self;
 }
 
+struct StreamReader<S> {
+    inner: S,
+    buffer: Vec<u8>,
+    consumed: usize,
+}
+
+impl<S> StreamReader<S> {
+    pub fn new(stream: S) -> Self {
+        StreamReader {
+            inner: stream,
+            buffer: vec![],
+            consumed: 0,
+        }
+    }
+}
+
+impl<'a, S, I> AsyncRead for StreamReader<S>
+where
+    S: Stream<Item = I> + Unpin,
+    I: IntoByteVec,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if buf.remaining() == 0 {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        loop {
+            if self.consumed < self.buffer.len() {
+                let remaining = self.buffer.len() - self.consumed;
+                let read_to = std::cmp::min(buf.remaining(), remaining) + self.consumed;
+                buf.put_slice(&self.buffer[self.consumed..read_to]);
+                self.consumed = read_to;
+                return std::task::Poll::Ready(Ok(()));
+            } else {
+                match Pin::new(&mut self.inner).poll_next(cx) {
+                    std::task::Poll::Ready(Some(item)) => {
+                        self.buffer = item.into_byte_vec();
+                        self.consumed = 0;
+                        if self.buffer.len() == 0 {
+                            return std::task::Poll::Ready(Ok(()));
+                        }
+                    }
+                    std::task::Poll::Ready(None) => {
+                        return std::task::Poll::Ready(Ok(()));
+                    }
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+struct SenderWriter<Item> {
+    inner: Option<tokio_util::sync::PollSender<Item>>,
+}
+
+impl<Item> SenderWriter<Item>
+where
+    Item: Send + 'static,
+{
+    pub fn new(sender: mpsc::Sender<Item>) -> Self {
+        Self {
+            inner: Some(tokio_util::sync::PollSender::new(sender)),
+        }
+    }
+}
+
+impl<Item> AsyncWrite for SenderWriter<Item>
+where
+    Item: From<Vec<u8>> + Send + 'static,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        if buf.len() == 0 {
+            return std::task::Poll::Ready(Ok(0));
+        }
+
+        let Some(inner )= self.inner.as_mut() else {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "Sender is down.",
+        )))};
+        match inner.poll_reserve(cx) {
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(())) => {}
+            std::task::Poll::Ready(Err(_)) => {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "Channel is closed.",
+                )))
+            }
+        };
+        let item = buf.to_vec().into();
+        match inner.send_item(item) {
+            Ok(()) => std::task::Poll::Ready(Ok(buf.len())),
+            Err(_) => std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "Channel is closed.",
+            ))),
+        }
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        if self.inner.is_some() {
+            std::task::Poll::Ready(Ok(()))
+        } else {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "Sender is down.",
+            )))
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        // std::task::Poll::Ready(Ok(()))
+        match self.inner.take() {
+            Some(mut inner) => {
+                inner.close();
+                return std::task::Poll::Ready(Ok(()));
+            }
+            None => std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "Sender is down.",
+            ))),
+        }
+    }
+}
+
 struct SessionInfo<S> {
     sid: S,
     handles: Vec<JoinHandle<()>>,
@@ -85,6 +229,9 @@ where
     <<Inner as ClientInnerT>::OutStream as Stream>::Item: crate::AsBytes<'a> + Sync + Send,
     <Inner as ClientInnerT>::InStreamItem: Send + 'static + From<Vec<u8>>,
     <Inner as ClientInnerT>::SessionId: Clone + Debug + Sync + Send + 'static,
+    <Inner as ClientInnerT>::NinepInStreamItem: Send + 'static + From<Vec<u8>>,
+    <Inner as ClientInnerT>::NinepOutStream: Send + 'static + Stream + Unpin,
+    <<Inner as ClientInnerT>::NinepOutStream as Stream>::Item: IntoByteVec,
     // <<Inner as ClientInnerT>::InStream as Stream>::Item: Sync + Send + 'static,
 {
     pub async fn new(mut inner: Inner) -> Result<P9cpuClient<Inner>> {
@@ -97,7 +244,6 @@ where
                 if let Err(_e) = stdin_channel.stdin(sid, in_stream).await {}
             }
         });
-        // let (ninep_tx, mut ninep_rx) = mpsc::channel(buffer)
         Ok(Self {
             stdin_tx,
             inner,
@@ -112,7 +258,26 @@ where
         let tty = command.tty;
         let sid = self.inner.dial().await?;
         if !command.namespace.is_empty() {
-            // letself.inner.ninep_forward(sid.clone(), stream);
+            let (ninep_tx, ninep_rx) = mpsc::channel(1);
+            // ninep_tx.send(<Inner as ClientInnerT>::NinepInStreamItem::from(vec![])).await;
+            let ninep_in_stream = ReceiverStream::from(ninep_rx);
+            let ninep_out_stream = self
+                .inner
+                .ninep_forward(sid.clone(), ninep_in_stream)
+                .await?;
+            println!("ninep forward established");
+
+            let reader = StreamReader::new(ninep_out_stream);
+            let writer = SenderWriter::new(ninep_tx);
+            // tokio_util::io::StreamReader::new(ninep_out_stream);
+            let root = Path::new("/");
+            tokio::spawn(async move {
+                if let Err(e) =
+                    rs9p::srv::dispatch(rs9p::unpfs::Unpfs::new(&root), reader, writer).await
+                {
+                    println!("rs9p error : {:?}", e);
+                }
+            });
         }
         self.inner.start(sid.clone(), command).await?;
         let mut out_stream = self.inner.stdout(sid.clone()).await?;
