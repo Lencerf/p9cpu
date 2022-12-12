@@ -166,13 +166,9 @@ impl P9cpu for P9cpuService {
             return Err(Status::invalid_argument("no session id."));
         };
         let sid = vec_to_uuid(&id)?;
-        let stream = PrependedStream {
-            stream: in_stream,
-            item: Some(Ok(NinepForwardRequest { id: None, data })),
-        };
         let rx = self
             .inner
-            .ninep_forward(&sid, stream)
+            .ninep_forward(&sid, in_stream)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         let ninep_stream = ReceiverStream::new(rx);

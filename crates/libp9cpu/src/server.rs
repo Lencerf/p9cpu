@@ -244,7 +244,7 @@ fn cmd_mount_namespace(
         );
         std::fs::create_dir_all(&ninep_mount)?;
         mount(
-            Some("localhost"),
+            Some("127.0.0.1"),
             ninep_mount.as_str(),
             Some("9p"),
             MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
@@ -291,6 +291,12 @@ where
     ) -> Result<(Command, Option<File>), P9cpuServerError> {
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
+        unsafe {
+            cmd.pre_exec(|| {
+                close_fds::close_open_fds(3, &[]);
+                Ok(())
+            });
+        }
         if let Some(tmp_mnt) = command.tmp_mnt {
             create_tmp_mnt(&mut cmd, tmp_mnt.clone())?;
             if !command.namespace.is_empty() {
@@ -328,12 +334,6 @@ where
                 .stderr(Stdio::piped());
             None
         };
-        unsafe {
-            cmd.pre_exec(|| {
-                close_fds::set_fds_cloexec(3, &[]);
-                Ok(())
-            });
-        }
         Ok((cmd, pty_master))
     }
 
@@ -455,14 +455,14 @@ where
     {
         let pending = self.pending.write().await;
         let session = pending.get(&sid).ok_or(P9cpuServerError::SessionNotExist)?;
-        let listener = tokio::net::TcpListener::bind("[::1]:0")
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|_| P9cpuServerError::BindFail)?;
         let port = listener
             .local_addr()
             .map(|addr| addr.port())
             .map_err(|_| P9cpuServerError::BindFail)?;
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(10);
         let handle = tokio::spawn(async move {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;

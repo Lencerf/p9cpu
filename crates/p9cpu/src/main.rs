@@ -40,6 +40,9 @@ struct Args {
 
 fn parse_namespace(namespace: &str) -> HashMap<String, String> {
     let mut result = HashMap::new();
+    if namespace.is_empty() {
+        return result;
+    }
     for part in namespace.split(':') {
         let mut iter = part.split('=');
         let Some(target) = iter.next() else {
