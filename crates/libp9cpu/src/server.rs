@@ -1,6 +1,6 @@
 use std::{
-    collections::HashMap, fmt::Debug, hash::Hash, os::unix::prelude::FromRawFd, pin::Pin,
-    process::Stdio, sync::Arc,
+    collections::HashMap, fmt::Debug, hash::Hash, os::unix::prelude::{FromRawFd, OsStrExt}, pin::Pin,
+    process::Stdio, sync::Arc, ffi::OsStr,
 };
 
 use anyhow::Result;
@@ -88,7 +88,6 @@ pub struct Session {
     stdout: Arc<RwLock<StdoutReader>>,
     stderr: Arc<RwLock<Option<ChildStderr>>>,
     child: Arc<RwLock<Child>>,
-    ninep_port: Arc<RwLock<Option<u16>>>,
     handles: Arc<RwLock<Vec<JoinHandle<()>>>>,
 }
 
@@ -237,10 +236,15 @@ fn cmd_mount_namespace(
 ) {
     let op = move || {
         use nix::mount::{mount, MsFlags};
+        let user = std::env::var("USER");
+        let mut user = user.as_deref().unwrap_or("");
+        if user.len() == 0 {
+            user = "nouser";
+        }
         let ninep_mount = format!("{}/mnt9p", &tmp_mnt);
         let ninep_opt = format!(
-            "version=9p2000.L,trans=tcp,port={},uname=changyuanl",
-            ninep_port
+            "version=9p2000.L,trans=tcp,port={},uname={}",
+            ninep_port, user
         );
         std::fs::create_dir_all(&ninep_mount)?;
         mount(
@@ -289,8 +293,12 @@ where
         command: P9cpuCommand,
         ninep_port: Option<u16>,
     ) -> Result<(Command, Option<File>), P9cpuServerError> {
+        println!("get p9cpucmmand = {:?}", &command);
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
+        for env in command.env {
+            cmd.env(OsStr::from_bytes(&env.key), OsStr::from_bytes(&env.val));
+        }
         unsafe {
             cmd.pre_exec(|| {
                 close_fds::close_open_fds(3, &[]);
@@ -307,6 +315,7 @@ where
             }
             cmd_mount_fstab(&mut cmd, command.fstab)?;
         }
+        println!("tmp mnt is done");
         let pty_master = if command.tty {
             let result =
                 nix::pty::openpty(None, None).map_err(|e| P9cpuServerError::OpenPtyFail(e))?;
@@ -364,7 +373,9 @@ where
             handles.push(handle);
         }
         let (mut cmd, pty_master) = self.make_cmd(command, ninep_port)?;
+        println!("make command is done, will spawn");
         let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
+        println!("spawn command is done");
         let (stdin, stdout, stderr) = if let Some(master) = pty_master {
             let c = master.try_clone().await.unwrap();
             (StdinWriter::Pty(master), StdoutReader::Pty(c), None)
@@ -458,33 +469,48 @@ where
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|_| P9cpuServerError::BindFail)?;
+        println!("started listener on {:?}", listener.local_addr());
         let port = listener
             .local_addr()
             .map(|addr| addr.port())
             .map_err(|_| P9cpuServerError::BindFail)?;
         let (tx, rx) = mpsc::channel(10);
         let handle = tokio::spawn(async move {
-            let Ok((mut stream, _)) = listener.accept().await else {
+            let Ok((mut stream, peer)) = listener.accept().await else {
+                println!("get stream fail");
                 return;
             };
+            println!("get ninep request from client {:?}", peer);
             let (mut reader, mut writer) = stream.split();
             loop {
                 let mut buf = vec![0; 128];
                 tokio::select! {
                     len = reader.read(&mut buf) => {
-                        let Ok(len) = len else { break };
+                        let Ok(len) = len else {
+                            println!("buf from reader is err");
+                            break 
+                        };
                         if len == 0 {
+                            println!("buf from reader is 0");
                             break;
                         }
                         let item = OItem::from_vec_u8(buf[0..len].to_vec());
                         if tx.send(item).await.is_err() {
+                            println!("tx is gone");
                             break;
                         }
                     }
                     in_item = in_stream.next() => {
-                        let Some(in_item) = in_item else {break};
-                        let Ok(len) = writer.write(in_item.as_bytes()).await else { break };
+                        let Some(in_item) = in_item else {
+                            println!("in item is none");
+                            break
+                        };
+                        let Ok(len) = writer.write(in_item.as_bytes()).await else { 
+                            println!("send bytes to os client fail");
+                            break 
+                        };
                         if len == 0 {
+                            println!("send bytes to os client is o");
                             break;
                         }
                     }

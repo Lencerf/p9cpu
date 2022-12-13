@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, os::unix::prelude::OsStringExt};
 
-use libp9cpu::{fstab::FsTab, P9cpuCommand};
+use libp9cpu::{fstab::FsTab, EnvVar, P9cpuCommand};
 
 use clap::Parser;
 use tokio::io::AsyncBufReadExt;
@@ -80,6 +80,13 @@ async fn app() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut client = libp9cpu::client::rpc_based(addr).await?;
 
+    let env_vars: Vec<_> = std::env::vars_os()
+        .map(|(k, v)| EnvVar {
+            key: k.into_vec(),
+            val: v.into_vec(),
+        })
+        .collect();
+
     let mut fs_tab_lines = vec![];
     if let Some(ref fs_tab) = args.fs_tab {
         let fs_tab_file = tokio::fs::File::open(fs_tab).await?;
@@ -94,7 +101,7 @@ async fn app() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = P9cpuCommand {
         program: args.host_and_args[1].clone(),
         args: args.host_and_args[2..].to_vec(),
-        env: vec![],
+        env: env_vars,
         namespace: parse_namespace(&args.namespace),
         fstab: fs_tab_lines,
         tty: args.tty,

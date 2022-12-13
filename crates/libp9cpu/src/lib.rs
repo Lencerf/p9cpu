@@ -4,6 +4,7 @@ pub mod rpc;
 pub mod server;
 
 pub type P9cpuCommand = crate::rpc::P9cpuCommand;
+pub type EnvVar = crate::rpc::EnvVar;
 
 #[derive(Debug)]
 pub enum Addr {

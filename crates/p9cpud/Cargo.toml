@@ -18,7 +18,7 @@ tower = "0.4.13"
 clap = { version = "4.0.29", features = ["derive"] }
 libc = "0.2.138"
 nix = "0.26.1"
-tokio-vsock = { path = "/usr/local/google/home/changyuanl/tokio-vsock", version = "0.3.3", features = ["tonic-conn"] }
+tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = ["tonic-conn"], rev = "e502caf"  }
 vsock = "0.3.0"
 
 [package.metadata.cargo-udeps.ignore]

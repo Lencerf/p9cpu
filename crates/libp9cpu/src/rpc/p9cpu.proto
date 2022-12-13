@@ -15,10 +15,15 @@ message StartRequest {
     P9cpuCommand cmd = 2;
 }
 
+message EnvVar {
+    bytes key = 1;
+    bytes val = 2;
+}
+
 message P9cpuCommand {
     string program = 1;
     repeated string args = 2;
-    repeated string env = 3;
+    repeated EnvVar env = 3;
     repeated FsTab fstab = 4;
     map<string, string> namespace = 5;
     bool tty = 6;

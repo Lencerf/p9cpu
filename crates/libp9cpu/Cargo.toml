@@ -20,12 +20,12 @@ anyhow = "1"
 tower = "0.4.13"
 nix = "0.26.1"
 libc = "0.2.138"
-close_fds = "0.2"
-tokio-vsock = { path = "/usr/local/google/home/changyuanl/tokio-vsock", version = "0.3.3", features = ["tonic-conn"] }
+close_fds = "0.3"
+tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = ["tonic-conn"], rev = "e502caf"  }
 vsock = "0.3.0"
 rust-9p = { path = "../9p", version = "*"}
 tokio-util = { version = "0.7.4", features = ["io"] }
 
 [build-dependencies]
 tonic-build = "0.8.4"
-prost-build = "0.11.3"
+prost-build = "0.11.4"
