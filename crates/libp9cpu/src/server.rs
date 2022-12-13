@@ -394,7 +394,6 @@ where
             stdout: Arc::new(RwLock::new(stdout)),
             stderr: Arc::new(RwLock::new(stderr)),
             child: Arc::new(RwLock::new(child)),
-            ninep_port: Arc::new(RwLock::new(None)),
             handles: Arc::new(RwLock::new(handles)),
         };
         sessions.insert(sid, info);
