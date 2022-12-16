@@ -1,7 +1,7 @@
 use std::{collections::HashMap, os::unix::prelude::OsStringExt};
 
 use libp9cpu::{fstab::FsTab, EnvVar, P9cpuCommand};
-
+use anyhow::Result;
 use clap::Parser;
 use tokio::io::AsyncBufReadExt;
 
@@ -22,7 +22,7 @@ struct Args {
     #[arg(long, default_value_t = 11200)]
     port: u32,
 
-    #[arg(long = "namespace", default_value = "")]
+    #[arg(long, default_value = "")]
     namespace: String,
 
     #[arg(short, long, default_value_t = false)]
@@ -31,11 +31,17 @@ struct Args {
     #[arg(long)]
     fs_tab: Option<String>,
 
-    #[arg(long, default_value = "cputmp")]
+    #[arg(long, default_value = "/p9cputmp")]
     tmp_mnt: String,
 
+    #[arg()]
+    host: String,
+
+    #[arg()]
+    program: Option<String>,
+
     #[arg(last = true)]
-    host_and_args: Vec<String>,
+    args: Vec<String>,
 }
 
 fn parse_namespace(namespace: &str) -> HashMap<String, String> {
@@ -63,20 +69,15 @@ fn parse_namespace(namespace: &str) -> HashMap<String, String> {
     result
 }
 
-async fn app() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-    if args.host_and_args.len() < 2 {
-        println!("no engouth args");
-        return Ok(());
-    }
-    let host = &args.host_and_args[0];
+async fn app(args: Args) -> Result<()> {
+    println!("args = {:?}", args);
     let addr = match args.net {
         Net::Vsock => libp9cpu::Addr::Vsock(tokio_vsock::VsockAddr::new(
-            host.parse().unwrap(),
+            args.host.parse().unwrap(),
             args.port,
         )),
-        Net::Unix => libp9cpu::Addr::Uds(host.to_owned()),
-        Net::Tcp => libp9cpu::Addr::Tcp(format!("{}:{}", host, args.port).parse().unwrap()),
+        Net::Unix => libp9cpu::Addr::Uds(args.host),
+        Net::Tcp => libp9cpu::Addr::Tcp(format!("{}:{}", args.host, args.port).parse()?),
     };
     let mut client = libp9cpu::client::rpc_based(addr).await?;
 
@@ -99,8 +100,8 @@ async fn app() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let cmd = P9cpuCommand {
-        program: args.host_and_args[1].clone(),
-        args: args.host_and_args[2..].to_vec(),
+        program: args.program.unwrap(),
+        args: args.args,
         env: env_vars,
         namespace: parse_namespace(&args.namespace),
         fstab: fs_tab_lines,
@@ -116,13 +117,14 @@ async fn app() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
+    let args = Args::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
 
-    let ret = runtime.block_on(app());
+    let ret = runtime.block_on(app(args));
 
     runtime.shutdown_timeout(std::time::Duration::from_secs(0));
 

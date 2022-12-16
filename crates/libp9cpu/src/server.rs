@@ -293,12 +293,14 @@ where
         command: P9cpuCommand,
         ninep_port: Option<u16>,
     ) -> Result<(Command, Option<File>), P9cpuServerError> {
-        println!("get p9cpucmmand = {:?}", &command);
+        // println!("get p9cpucmmand = {:?}", &command);
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
         for env in command.env {
+            println!("{} {}", String::from_utf8_lossy(&env.key), String::from_utf8_lossy(&env.val));
             cmd.env(OsStr::from_bytes(&env.key), OsStr::from_bytes(&env.val));
         }
+        // cmd.env("TERM", "ansi");
         unsafe {
             cmd.pre_exec(|| {
                 close_fds::close_open_fds(3, &[]);
@@ -315,6 +317,18 @@ where
             }
             cmd_mount_fstab(&mut cmd, command.fstab)?;
         }
+        // unsafe {
+        //     cmd.pre_exec(|| {
+        //         nix::unistd::chdir("/bin")?;
+        //         // std/src/sys/unix/process/process_unix.rs do_exec()
+        //         if let Ok(pwd) = std::env::var("PWD") {
+        //             std::env::set_current_dir("/bin")?;
+        //         } else {
+        //             return Err(std::io::Error::from_raw_os_error(3));
+        //         }
+        //         Ok(())
+        //     });
+        // };
         println!("tmp mnt is done");
         let pty_master = if command.tty {
             let result =
