@@ -137,7 +137,7 @@ fn parse_fstab_opt(opt: &str) -> (nix::mount::MsFlags, String) {
             opts.push(f);
         }
     }
-    return (flag, opts.join(","));
+    (flag, opts.join(","))
 }
 
 fn parse_fstab_line(tab: FsTab) -> Result<MountParams, P9cpuServerError> {
@@ -175,7 +175,7 @@ pub struct P9cpuServerInner<I> {
 }
 
 fn create_tmp_mnt(cmd: &mut Command, tmp_mnt: String) -> Result<(), P9cpuServerError> {
-    std::fs::create_dir_all(&tmp_mnt).map_err(|e| P9cpuServerError::MkDir(e))?;
+    std::fs::create_dir_all(&tmp_mnt).map_err(P9cpuServerError::MkDir)?;
     let op = move || {
         // std/src/sys/unix/process/process_unix.rs
         use nix::mount::{mount, MsFlags};
@@ -238,7 +238,7 @@ fn cmd_mount_namespace(
         use nix::mount::{mount, MsFlags};
         let user = std::env::var("USER");
         let mut user = user.as_deref().unwrap_or("");
-        if user.len() == 0 {
+        if user.is_empty() {
             user = "nouser";
         }
         let ninep_mount = format!("{}/mnt9p", &tmp_mnt);
@@ -332,14 +332,14 @@ where
         println!("tmp mnt is done");
         let pty_master = if command.tty {
             let result =
-                nix::pty::openpty(None, None).map_err(|e| P9cpuServerError::OpenPtyFail(e))?;
+                nix::pty::openpty(None, None).map_err(P9cpuServerError::OpenPtyFail)?;
             let stdin = unsafe { std::fs::File::from_raw_fd(result.slave) };
             let stdout = stdin
                 .try_clone()
-                .map_err(|e| P9cpuServerError::FdCloneFail(e))?;
+                .map_err(P9cpuServerError::FdCloneFail)?;
             let stderr = stdin
                 .try_clone()
-                .map_err(|e| P9cpuServerError::FdCloneFail(e))?;
+                .map_err(P9cpuServerError::FdCloneFail)?;
             // Stdio::
             cmd.stdin(stdin).stdout(stdout).stderr(stderr);
             unsafe {
@@ -478,7 +478,7 @@ where
         IItem: AsBytes<'a> + Send + Sync,
     {
         let pending = self.pending.write().await;
-        let session = pending.get(&sid).ok_or(P9cpuServerError::SessionNotExist)?;
+        let session = pending.get(sid).ok_or(P9cpuServerError::SessionNotExist)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|_| P9cpuServerError::BindFail)?;

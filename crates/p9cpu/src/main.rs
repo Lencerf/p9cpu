@@ -93,7 +93,7 @@ async fn app(args: Args) -> Result<()> {
         let fs_tab_file = tokio::fs::File::open(fs_tab).await?;
         let mut lines = tokio::io::BufReader::new(fs_tab_file).lines();
         while let Some(line) = lines.next_line().await? {
-            if line.starts_with("#") {
+            if line.starts_with('#') {
                 continue;
             }
             fs_tab_lines.push(FsTab::try_from(line.as_str())?);
@@ -106,7 +106,7 @@ async fn app(args: Args) -> Result<()> {
         namespace: parse_namespace(&args.namespace),
         fstab: fs_tab_lines,
         tty: args.tty,
-        tmp_mnt: if args.tmp_mnt.len() > 0 {
+        tmp_mnt: if !args.tmp_mnt.is_empty() {
             Some(args.tmp_mnt)
         } else {
             None

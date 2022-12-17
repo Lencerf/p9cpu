@@ -162,7 +162,7 @@ impl P9cpu for P9cpuService {
         request: Request<Streaming<NinepForwardRequest>>,
     ) -> RpcResult<Self::NinepForwardStream> {
         let mut in_stream = request.into_inner();
-        let Some(Ok(NinepForwardRequest { id: Some(id), data })) = in_stream.next().await else {
+        let Some(Ok(NinepForwardRequest { id: Some(id), data: _ })) = in_stream.next().await else {
             return Err(Status::invalid_argument("no session id."));
         };
         let sid = vec_to_uuid(&id)?;

@@ -96,7 +96,7 @@ where
                     std::task::Poll::Ready(Some(item)) => {
                         self.buffer = item.into_byte_vec();
                         self.consumed = 0;
-                        if self.buffer.len() == 0 {
+                        if self.buffer.is_empty() {
                             return std::task::Poll::Ready(Ok(()));
                         }
                     }
@@ -134,7 +134,7 @@ where
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return std::task::Poll::Ready(Ok(0));
         }
 
@@ -185,7 +185,7 @@ where
         match self.inner.take() {
             Some(mut inner) => {
                 inner.close();
-                return std::task::Poll::Ready(Ok(()));
+                std::task::Poll::Ready(Ok(()))
             }
             None => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -273,7 +273,7 @@ where
             let root = Path::new("/");
             tokio::spawn(async move {
                 if let Err(e) =
-                    rs9p::srv::dispatch(rs9p::unpfs::Unpfs::new(&root), reader, writer).await
+                    rs9p::srv::dispatch(rs9p::unpfs::Unpfs::new(root), reader, writer).await
                 {
                     println!("rs9p error : {:?}", e);
                 }

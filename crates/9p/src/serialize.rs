@@ -911,7 +911,7 @@ fn encoder_test1() {
     let expected: Vec<u8> = (0..10).collect();
     let mut encoder = Vec::new();
     for i in 0..10 {
-        (&(i as u8)).encode(&mut encoder).unwrap();
+        (i as u8).encode(&mut encoder).unwrap();
     }
     assert_eq!(expected, encoder);
 }
