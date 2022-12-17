@@ -19,9 +19,6 @@ struct Args {
     port: u32,
     #[arg(long)]
     uds: Option<String>,
-
-    #[arg(last = true)]
-    cmd_args: Vec<String>,
 }
 
 #[tokio::main]

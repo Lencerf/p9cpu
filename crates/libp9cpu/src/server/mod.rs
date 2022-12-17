@@ -204,7 +204,7 @@ where
     fn make_cmd(
         &self,
         command: P9cpuCommand,
-        _ninep_port: Option<u16>,
+        ninep_port: Option<u16>,
         listener_fd: Option<RawFd>,
     ) -> Result<(Command, Option<File>), P9cpuServerError> {
         // println!("get p9cpucmmand = {:?}", &command);
@@ -223,27 +223,36 @@ where
             cmd.env(OsStr::from_bytes(&env.key), OsStr::from_bytes(&env.val));
         }
         // cmd.env("TERM", "ansi");
+
         unsafe {
             cmd.pre_exec(move || {
-                if let Some(fd) = listener_fd {
-                    libc::close(fd);
-                }
-                close_fds::set_fds_cloexec(3, &[]);
+                return Err(std::io::Error::from_raw_os_error(1));
+                // for fd in 3..=11 {
+                //     libc::close(fd);
+                // }
+                // if let Some(fd) = listener_fd {
+                //     let ret = libc::close(fd);
+                //     if ret != 0 {
+                //         return Err(std::io::Error::last_os_error());
+                //     }
+                // }
+                // close_fds::close_open_fds(3, &[17]);
+                // close_fds::close_open_fds(3, &[17]);
                 Ok(())
             });
         }
-        if let Some(_tmp_mnt) = command.tmp_mnt {
-            pre_exec::create_private_root(&mut cmd);
-            // if !command.namespace.is_empty() {
-            //     let Some(ninep_port) = ninep_port else {
-            //         return Err(P9cpuServerError::No9pPort);
-            //     };
-            //     // cmd_mount_namespace(&mut cmd, command.namespace, tmp_mnt, ninep_port);
-            //     pre_exec::create_namespace_9p(&mut cmd, command.namespace, tmp_mnt, ninep_port, "changyuanl")?;
-            // }
-            pre_exec::mount_fstab(&mut cmd, command.fstab)?;
+        // pre_exec::create_private_root(&mut cmd);
+        if let Some(tmp_mnt) = command.tmp_mnt {
+            if !command.namespace.is_empty() {
+                let Some(ninep_port) = ninep_port else {
+                    return Err(P9cpuServerError::No9pPort);
+                };
+                // cmd_mount_namespace(&mut cmd, command.namespace, tmp_mnt, ninep_port);
+                pre_exec::create_namespace_9p(&mut cmd, command.namespace, tmp_mnt, ninep_port, "changyuanl")?;
+            }
             // cmd_mount_fstab(&mut cmd, command.fstab)?;
         }
+        pre_exec::mount_fstab(&mut cmd, command.fstab)?;
         // unsafe {
         //     cmd.pre_exec(|| {
         //         nix::unistd::chdir("/bin")?;
@@ -423,12 +432,12 @@ where
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|_| P9cpuServerError::BindFail)?;
-        println!("started listener on {:?}", listener.local_addr());
         let port = listener
             .local_addr()
             .map(|addr| addr.port())
             .map_err(|_| P9cpuServerError::BindFail)?;
         let listener_fd = listener.as_raw_fd();
+        println!("started listener on {:?}, fd={}", listener.local_addr(), listener_fd);
         let (tx, rx) = mpsc::channel(10);
         let handle = tokio::spawn(async move {
             let Ok((mut stream, peer)) = listener.accept().await else {
