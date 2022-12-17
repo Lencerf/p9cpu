@@ -1,8 +1,15 @@
 use std::{
-    collections::HashMap, fmt::Debug, hash::Hash, os::unix::prelude::{FromRawFd, OsStrExt}, pin::Pin,
-    process::Stdio, sync::Arc, ffi::OsStr,
+    collections::HashMap,
+    ffi::{CString, OsStr},
+    fmt::Debug,
+    hash::Hash,
+    os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt, RawFd},
+    pin::Pin,
+    process::Stdio,
+    sync::Arc,
 };
 
+use crate::{fstab::FsTab, rpc, AsBytes, FromVecu8, P9cpuCommand};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -18,7 +25,6 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{fstab::FsTab, rpc, AsBytes, FromVecu8, P9cpuCommand};
 #[async_trait]
 pub trait P9cpuServerT {
     async fn serve(&self, addr: crate::Addr) -> Result<()>;
@@ -93,7 +99,7 @@ pub struct Session {
 
 #[derive(Debug)]
 pub struct PendingSession {
-    ninep: Arc<RwLock<Option<(u16, JoinHandle<()>)>>>,
+    ninep: Arc<RwLock<Option<(u16, RawFd, JoinHandle<()>)>>>,
 }
 
 #[derive(Error, Debug)]
@@ -122,6 +128,8 @@ pub enum P9cpuServerError {
     BindFail,
     #[error("9p forward not setup")]
     No9pPort,
+    #[error("String contains null: {0:?}")]
+    StringContainsNull(std::ffi::NulError),
 }
 
 fn parse_fstab_opt(opt: &str) -> (nix::mount::MsFlags, String) {
@@ -140,139 +148,44 @@ fn parse_fstab_opt(opt: &str) -> (nix::mount::MsFlags, String) {
     (flag, opts.join(","))
 }
 
-fn parse_fstab_line(tab: FsTab) -> Result<MountParams, P9cpuServerError> {
-    let FsTab {
-        spec: source,
-        file: target,
-        vfstype: fstype,
-        mntops: opt,
-        freq: _,
-        passno: _,
-    } = tab;
-    let (flags, data) = parse_fstab_opt(&opt);
-    Ok(MountParams {
-        source: Some(source),
-        target,
-        fstype: Some(fstype),
-        flags,
-        // data: if data.len() == 0 { None } else { Some(data) },
-        data: Some(data),
-    })
+struct MountParams {
+    source: Option<CString>,
+    target: CString,
+    fstype: Option<CString>,
+    flags: nix::mount::MsFlags,
+    data: Option<CString>,
 }
 
-struct MountParams {
-    source: Option<String>,
-    target: String,
-    fstype: Option<String>,
-    flags: nix::mount::MsFlags,
-    data: Option<String>,
+impl TryFrom<FsTab> for MountParams {
+    type Error = P9cpuServerError;
+    fn try_from(tab: FsTab) -> Result<Self, P9cpuServerError> {
+        let FsTab {
+            spec: source,
+            file: target,
+            vfstype: fstype,
+            mntops: opt,
+            freq: _,
+            passno: _,
+        } = tab;
+        let (flags, data) = parse_fstab_opt(&opt);
+        let op = P9cpuServerError::StringContainsNull;
+        let mnt = MountParams {
+            source: Some(CString::new(source).map_err(op)?),
+            target: CString::new(target).map_err(op)?,
+            fstype: Some(CString::new(fstype).map_err(op)?),
+            flags,
+            data: Some(CString::new(data).map_err(op)?),
+        };
+        Ok(mnt)
+    }
 }
+
+mod pre_exec;
 
 #[derive(Debug, Default)]
 pub struct P9cpuServerInner<I> {
     sessions: Arc<RwLock<HashMap<I, Session>>>,
     pending: Arc<RwLock<HashMap<I, PendingSession>>>,
-}
-
-fn create_tmp_mnt(cmd: &mut Command, tmp_mnt: String) -> Result<(), P9cpuServerError> {
-    std::fs::create_dir_all(&tmp_mnt).map_err(P9cpuServerError::MkDir)?;
-    let op = move || {
-        // std/src/sys/unix/process/process_unix.rs
-        use nix::mount::{mount, MsFlags};
-        use nix::sched::{unshare, CloneFlags};
-        unshare(CloneFlags::CLONE_NEWNS)?;
-        // https://go-review.git.corp.google.com/c/go/+/38471
-        mount(
-            Option::<&str>::None,
-            "/",
-            Option::<&str>::None,
-            MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-            Option::<&str>::None,
-        )?;
-        mount(
-            Some("p9cpu"),
-            tmp_mnt.as_str(),
-            Some("tmpfs"),
-            MsFlags::empty(),
-            Option::<&str>::None,
-        )?;
-        Ok(())
-    };
-    unsafe {
-        cmd.pre_exec(op);
-    }
-    Ok(())
-}
-
-fn cmd_mount_fstab(cmd: &mut Command, fstab: Vec<FsTab>) -> Result<(), P9cpuServerError> {
-    let mut mount_params = vec![];
-    for tab in fstab {
-        mount_params.push(parse_fstab_line(tab)?);
-    }
-    let mount_fstab = move || {
-        for param in &mount_params {
-            std::fs::create_dir_all(&param.target)?;
-            nix::mount::mount(
-                param.source.as_deref(),
-                param.target.as_str(),
-                param.fstype.as_deref(),
-                param.flags,
-                param.data.as_deref(),
-            )?;
-        }
-        Ok(())
-    };
-    unsafe {
-        cmd.pre_exec(mount_fstab);
-    }
-    Ok(())
-}
-
-fn cmd_mount_namespace(
-    cmd: &mut Command,
-    namespace: HashMap<String, String>,
-    tmp_mnt: String,
-    ninep_port: u16,
-) {
-    let op = move || {
-        use nix::mount::{mount, MsFlags};
-        let user = std::env::var("USER");
-        let mut user = user.as_deref().unwrap_or("");
-        if user.is_empty() {
-            user = "nouser";
-        }
-        let ninep_mount = format!("{}/mnt9p", &tmp_mnt);
-        let ninep_opt = format!(
-            "version=9p2000.L,trans=tcp,port={},uname={}",
-            ninep_port, user
-        );
-        std::fs::create_dir_all(&ninep_mount)?;
-        mount(
-            Some("127.0.0.1"),
-            ninep_mount.as_str(),
-            Some("9p"),
-            MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
-            Some(ninep_opt).as_deref(),
-        )?;
-        for (target, mut source) in namespace.iter() {
-            std::fs::create_dir_all(target)?;
-            if source.is_empty() {
-                source = target;
-            }
-            let local_source = format!("{}{}", &ninep_mount, source);
-            mount(
-                Some(local_source).as_deref(),
-                target.as_str(),
-                Option::<&str>::None,
-                MsFlags::MS_BIND,
-                Option::<&str>::None,
-            )?;
-        }
-        Ok(())
-    };
-    unsafe {
-        cmd.pre_exec(op);
-    }
 }
 
 impl<SID> P9cpuServerInner<SID>
@@ -291,31 +204,45 @@ where
     fn make_cmd(
         &self,
         command: P9cpuCommand,
-        ninep_port: Option<u16>,
+        _ninep_port: Option<u16>,
+        listener_fd: Option<RawFd>,
     ) -> Result<(Command, Option<File>), P9cpuServerError> {
         // println!("get p9cpucmmand = {:?}", &command);
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
+        // let mut user = None;
         for env in command.env {
-            println!("{} {}", String::from_utf8_lossy(&env.key), String::from_utf8_lossy(&env.val));
+            // println!(
+            //     "{} {}",
+            //     String::from_utf8_lossy(&env.key),
+            //     String::from_utf8_lossy(&env.val)
+            // );
+            if env.key.starts_with(b"USER") {
+                println!("find user {:?} {:?}", &env.key, &env.val);
+            }
             cmd.env(OsStr::from_bytes(&env.key), OsStr::from_bytes(&env.val));
         }
         // cmd.env("TERM", "ansi");
         unsafe {
-            cmd.pre_exec(|| {
-                close_fds::close_open_fds(3, &[]);
+            cmd.pre_exec(move || {
+                if let Some(fd) = listener_fd {
+                    libc::close(fd);
+                }
+                close_fds::set_fds_cloexec(3, &[]);
                 Ok(())
             });
         }
-        if let Some(tmp_mnt) = command.tmp_mnt {
-            create_tmp_mnt(&mut cmd, tmp_mnt.clone())?;
-            if !command.namespace.is_empty() {
-                let Some(ninep_port) = ninep_port else {
-                    return Err(P9cpuServerError::No9pPort);
-                };
-                cmd_mount_namespace(&mut cmd, command.namespace, tmp_mnt, ninep_port);
-            }
-            cmd_mount_fstab(&mut cmd, command.fstab)?;
+        if let Some(_tmp_mnt) = command.tmp_mnt {
+            pre_exec::create_private_root(&mut cmd);
+            // if !command.namespace.is_empty() {
+            //     let Some(ninep_port) = ninep_port else {
+            //         return Err(P9cpuServerError::No9pPort);
+            //     };
+            //     // cmd_mount_namespace(&mut cmd, command.namespace, tmp_mnt, ninep_port);
+            //     pre_exec::create_namespace_9p(&mut cmd, command.namespace, tmp_mnt, ninep_port, "changyuanl")?;
+            // }
+            pre_exec::mount_fstab(&mut cmd, command.fstab)?;
+            // cmd_mount_fstab(&mut cmd, command.fstab)?;
         }
         // unsafe {
         //     cmd.pre_exec(|| {
@@ -382,13 +309,27 @@ where
         }
         let mut handles = vec![];
         let mut ninep_port = None;
-        if let Some((port, handle)) = ninep.write().await.take() {
+        let mut listener_fd = None;
+        if let Some((port, fd, handle)) = ninep.write().await.take() {
             ninep_port = Some(port);
+            listener_fd = Some(fd);
             handles.push(handle);
         }
-        let (mut cmd, pty_master) = self.make_cmd(command, ninep_port)?;
+        let (mut cmd, pty_master) = self.make_cmd(command, ninep_port, listener_fd)?;
         println!("make command is done, will spawn");
-        let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
+        let mut child;
+        match cmd.spawn() {
+            Ok(c) => child = c,
+            Err(e) => {
+                if let Some(mut master) = pty_master {
+                    let mut buf = vec![0;128];
+                    let len = master.read(&mut buf).await.map_err(P9cpuServerError::StdIo)?;
+                    println!("child spawn fail, output from master = {}, len = {}", String::from_utf8_lossy(&buf[0..len]), len);
+                }
+                return Err(P9cpuServerError::SpawnFail(e));
+            }
+        }
+        // let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
         println!("spawn command is done");
         let (stdin, stdout, stderr) = if let Some(master) = pty_master {
             let c = master.try_clone().await.unwrap();
@@ -487,6 +428,7 @@ where
             .local_addr()
             .map(|addr| addr.port())
             .map_err(|_| P9cpuServerError::BindFail)?;
+        let listener_fd = listener.as_raw_fd();
         let (tx, rx) = mpsc::channel(10);
         let handle = tokio::spawn(async move {
             let Ok((mut stream, peer)) = listener.accept().await else {
@@ -501,7 +443,7 @@ where
                     len = reader.read(&mut buf) => {
                         let Ok(len) = len else {
                             println!("buf from reader is err");
-                            break 
+                            break
                         };
                         if len == 0 {
                             println!("buf from reader is 0");
@@ -518,9 +460,9 @@ where
                             println!("in item is none");
                             break
                         };
-                        let Ok(len) = writer.write(in_item.as_bytes()).await else { 
+                        let Ok(len) = writer.write(in_item.as_bytes()).await else {
                             println!("send bytes to os client fail");
-                            break 
+                            break
                         };
                         if len == 0 {
                             println!("send bytes to os client is o");
@@ -530,7 +472,7 @@ where
                 }
             }
         });
-        *session.ninep.write().await = Some((port, handle));
+        *session.ninep.write().await = Some((port, listener_fd, handle));
         Ok(rx)
     }
 
