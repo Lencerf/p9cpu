@@ -21,8 +21,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 #[async_trait]
 pub trait ClientInnerT {
-    type Error;
-    type SessionId;
+    type Error: Sync + Send + std::error::Error + 'static;
+    type SessionId: Clone + Debug + Sync + Send + 'static;
     async fn dial(&mut self) -> Result<Self::SessionId, Self::Error>;
     async fn start(
         &mut self,
@@ -32,22 +32,20 @@ pub trait ClientInnerT {
 
     async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
 
-    type OutStream;
-    // https://github.com/rust-lang/rust/issues/29661
-    // type StderrStream = Self::OutStream;
+    type OutStream: Send + 'static + Stream + Unpin;
     async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
     async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
 
-    type InStreamItem;
-    type StdinFuture;
+    type InStreamItem: Send + 'static + From<Vec<u8>>;
+    type StdinFuture: Future<Output = Result<(), Self::Error>> + Send;
     async fn stdin(
         &mut self,
         sid: Self::SessionId,
         stream: impl Stream<Item = Self::InStreamItem> + Send + Sync + 'static + Unpin,
     ) -> Self::StdinFuture;
 
-    type NinepInStreamItem;
-    type NinepOutStream;
+    type NinepInStreamItem: Send + 'static + From<Vec<u8>>;
+    type NinepOutStream: Send + 'static + Stream + Unpin;
     async fn ninep_forward(
         &mut self,
         sid: Self::SessionId,
@@ -220,14 +218,7 @@ pub struct P9cpuClient<Inner: ClientInnerT> {
 impl<'a, Inner> P9cpuClient<Inner>
 where
     Inner: ClientInnerT + Sync + Send + 'static,
-    <Inner as ClientInnerT>::StdinFuture: Future<Output = Result<(), <Inner as ClientInnerT>::Error>> + Send,
-    <Inner as ClientInnerT>::Error: Sync + Send + std::error::Error + 'static,
-    <Inner as ClientInnerT>::OutStream: Send + 'static + Stream + Unpin,
     <<Inner as ClientInnerT>::OutStream as Stream>::Item: crate::AsBytes<'a> + Sync + Send,
-    <Inner as ClientInnerT>::InStreamItem: Send + 'static + From<Vec<u8>>,
-    <Inner as ClientInnerT>::SessionId: Clone + Debug + Sync + Send + 'static,
-    <Inner as ClientInnerT>::NinepInStreamItem: Send + 'static + From<Vec<u8>>,
-    <Inner as ClientInnerT>::NinepOutStream: Send + 'static + Stream + Unpin,
     <<Inner as ClientInnerT>::NinepOutStream as Stream>::Item: IntoByteVec,
 {
     pub async fn new(inner: Inner) -> Result<P9cpuClient<Inner>> {
@@ -247,7 +238,7 @@ where
             let (ninep_tx, ninep_rx) = mpsc::channel(1);
             // ninep_tx.send(<Inner as ClientInnerT>::NinepInStreamItem::from(vec![])).await;
             let ninep_in_stream = ReceiverStream::from(ninep_rx);
-            let ninep_out_stream = self
+            let ninep_out_stream =  self
                 .inner
                 .ninep_forward(sid.clone(), ninep_in_stream)
                 .await?;
