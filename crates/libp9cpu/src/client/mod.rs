@@ -9,6 +9,7 @@ use crate::P9cpuCommand;
 use crate::{AsBytes, IntoByteVec};
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::Future;
 use futures::{Stream, StreamExt};
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -38,11 +39,12 @@ pub trait ClientInnerT {
     async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
 
     type InStreamItem;
+    type StdinFuture;
     async fn stdin(
         &mut self,
         sid: Self::SessionId,
         stream: impl Stream<Item = Self::InStreamItem> + Send + Sync + 'static + Unpin,
-    ) -> Result<(), Self::Error>;
+    ) -> Self::StdinFuture;
 
     type NinepInStreamItem;
     type NinepOutStream;
@@ -51,8 +53,6 @@ pub trait ClientInnerT {
         sid: Self::SessionId,
         stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
     ) -> Result<Self::NinepOutStream, Self::Error>;
-
-    fn side_channel(&mut self) -> Self;
 }
 
 struct StreamReader<S> {
@@ -214,16 +214,13 @@ pub enum P9cpuClientError {
 
 pub struct P9cpuClient<Inner: ClientInnerT> {
     inner: Inner,
-    stdin_tx: mpsc::Sender<(
-        <Inner as ClientInnerT>::SessionId,
-        mpsc::Receiver<<Inner as ClientInnerT>::InStreamItem>,
-    )>,
     session_info: Option<SessionInfo<Inner::SessionId>>,
 }
 
 impl<'a, Inner> P9cpuClient<Inner>
 where
     Inner: ClientInnerT + Sync + Send + 'static,
+    <Inner as ClientInnerT>::StdinFuture: Future<Output = Result<(), <Inner as ClientInnerT>::Error>> + Send,
     <Inner as ClientInnerT>::Error: Sync + Send + std::error::Error + 'static,
     <Inner as ClientInnerT>::OutStream: Send + 'static + Stream + Unpin,
     <<Inner as ClientInnerT>::OutStream as Stream>::Item: crate::AsBytes<'a> + Sync + Send,
@@ -232,20 +229,9 @@ where
     <Inner as ClientInnerT>::NinepInStreamItem: Send + 'static + From<Vec<u8>>,
     <Inner as ClientInnerT>::NinepOutStream: Send + 'static + Stream + Unpin,
     <<Inner as ClientInnerT>::NinepOutStream as Stream>::Item: IntoByteVec,
-    // <<Inner as ClientInnerT>::InStream as Stream>::Item: Sync + Send + 'static,
 {
-    pub async fn new(mut inner: Inner) -> Result<P9cpuClient<Inner>> {
-        let mut stdin_channel = inner.side_channel();
-        let (stdin_tx, mut std_rx) =
-            mpsc::channel::<(Inner::SessionId, mpsc::Receiver<Inner::InStreamItem>)>(1);
-        tokio::spawn(async move {
-            while let Some((sid, rx)) = std_rx.recv().await {
-                let in_stream = ReceiverStream::new(rx);
-                if let Err(_e) = stdin_channel.stdin(sid, in_stream).await {}
-            }
-        });
+    pub async fn new(inner: Inner) -> Result<P9cpuClient<Inner>> {
         Ok(Self {
-            stdin_tx,
             inner,
             session_info: None,
         })
@@ -302,7 +288,8 @@ where
         });
         let (tx, rx) = mpsc::channel(1);
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
-        self.stdin_tx.send((sid.clone(), rx)).await?;
+        let in_stream = ReceiverStream::new(rx);
+        let stdin_future = self.inner.stdin(sid.clone(), in_stream).await;
         let in_handle = tokio::spawn(async move {
             loop {
                 let mut buf = vec![0];
@@ -317,6 +304,12 @@ where
                 if tx.send(buf.into()).await.is_err() {
                     break;
                 }
+            }
+            drop(tx);
+            if let Err(e) = stdin_future.await {
+                eprintln!("stdin future join error: {:?}", e);
+            } else {
+                eprintln!("stdin future done");
             }
         });
         self.session_info = Some(SessionInfo {

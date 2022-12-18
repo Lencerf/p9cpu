@@ -1,6 +1,10 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::{Future, Stream, StreamExt};
 use thiserror::Error;
+use tokio::task::JoinHandle;
 use tokio_vsock::VsockStream;
 
 use crate::rpc::{Empty, StartRequest};
@@ -12,6 +16,24 @@ use tonic::{Status, Streaming};
 use tower::service_fn;
 
 use super::PrependedStream;
+
+pub struct HandleFuture<R, E> {
+    handle: JoinHandle<Result<R, E>>,
+}
+
+impl<R, E> Future for HandleFuture<R, E>
+where
+    E: From<tokio::task::JoinError>,
+{
+    type Output = Result<R, E>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.handle).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(r)) => Poll::Ready(r),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(E::from(e))),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum RpcInnerError {
@@ -25,6 +47,14 @@ pub enum RpcInnerError {
     Rpc(Status),
     #[error("Invalid UUID {0}")]
     InvalidUuid(uuid::Error),
+    #[error("Task join error: {0}")]
+    JoinError(tokio::task::JoinError),
+}
+
+impl From<tokio::task::JoinError> for RpcInnerError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        RpcInnerError::JoinError(e)
+    }
 }
 
 pub struct RpcInner {
@@ -128,24 +158,32 @@ impl crate::client::ClientInnerT for RpcInner {
     }
 
     type InStreamItem = crate::rpc::P9cpuStdinRequest;
+    type StdinFuture = HandleFuture<(), Self::Error>;
     async fn stdin(
         &mut self,
         sid: Self::SessionId,
         mut stream: impl Stream<Item = Self::InStreamItem> + Send + Sync + 'static + Unpin,
-    ) -> Result<(), Self::Error> {
-        let Some(mut first_req) = stream.next().await else {
-            return Ok(());
-        };
-        first_req.id = Some(sid.into_bytes().into());
-        let stream = PrependedStream {
-            stream,
-            item: Some(first_req),
-        };
-        self.rpc_client
-            .stdin(stream)
-            .await
-            .map_err(RpcInnerError::Rpc)?;
-        Ok(())
+    ) -> Self::StdinFuture {
+        let channel = self.channel.clone();
+        let handle = tokio::spawn(async move {
+            let Some(mut first_req) = stream.next().await else {
+                return Ok(());
+            };
+            first_req.id = Some(sid.into_bytes().into());
+            let stream = PrependedStream {
+                stream,
+                item: Some(first_req),
+            };
+            let mut stdin_client = crate::rpc::p9cpu_client::P9cpuClient::new(channel);
+            stdin_client
+                .stdin(stream)
+                .await
+                .map_err(RpcInnerError::Rpc)?;
+            Ok(())
+        });
+        HandleFuture {
+            handle
+        }
     }
 
     type NinepInStreamItem = crate::rpc::NinepForwardRequest;
@@ -170,13 +208,5 @@ impl crate::client::ClientInnerT for RpcInner {
             .unwrap()
             .into_inner();
         Ok(out_stream)
-    }
-
-    fn side_channel(&mut self) -> Self {
-        let rpc_client = crate::rpc::p9cpu_client::P9cpuClient::new(self.channel.clone());
-        Self {
-            channel: self.channel.clone(),
-            rpc_client,
-        }
     }
 }
