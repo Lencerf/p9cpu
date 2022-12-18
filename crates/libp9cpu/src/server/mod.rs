@@ -3,7 +3,7 @@ use std::{
     ffi::{CString, OsStr},
     fmt::Debug,
     hash::Hash,
-    os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt, RawFd},
+    os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt},
     pin::Pin,
     process::Stdio,
     sync::Arc,
@@ -303,9 +303,9 @@ where
         if sessions.contains_key(&sid) {
             return Err(P9cpuServerError::DuplicateId);
         }
-        let mut handles = vec![];
+        let handles = vec![];
         let mut ninep_port = None;
-        if let Some((port, handle)) = ninep.write().await.take() {
+        if let Some((port, _handle)) = ninep.write().await.take() {
             ninep_port = Some(port);
             // handles.push(handle);
         }

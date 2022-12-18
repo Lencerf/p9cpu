@@ -17,20 +17,22 @@ use tower::service_fn;
 
 use super::PrependedStream;
 
-pub struct HandleFuture<R, E> {
-    handle: JoinHandle<Result<R, E>>,
+pub struct TryOrErrInto<F>
+{
+    future: F,
 }
 
-impl<R, E> Future for HandleFuture<R, E>
+impl<F, R, E1, E2> Future for TryOrErrInto<F>
 where
-    E: From<tokio::task::JoinError>,
+    E1: From<E2>,
+    F: Future<Output = Result<Result<R, E1>, E2>> + Unpin,
 {
-    type Output = Result<R, E>;
+    type Output = Result<R, E1>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.handle).poll(cx) {
+        match Pin::new(&mut self.future).poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(r)) => Poll::Ready(r),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(E::from(e))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(E1::from(e))),
         }
     }
 }
@@ -158,7 +160,7 @@ impl crate::client::ClientInnerT for RpcInner {
     }
 
     type InStreamItem = crate::rpc::P9cpuStdinRequest;
-    type StdinFuture = HandleFuture<(), Self::Error>;
+    type StdinFuture = TryOrErrInto<JoinHandle<Result<(), Self::Error>>>;
     async fn stdin(
         &mut self,
         sid: Self::SessionId,
@@ -181,9 +183,7 @@ impl crate::client::ClientInnerT for RpcInner {
                 .map_err(RpcInnerError::Rpc)?;
             Ok(())
         });
-        HandleFuture {
-            handle
-        }
+        TryOrErrInto { future: handle }
     }
 
     type NinepInStreamItem = crate::rpc::NinepForwardRequest;
