@@ -1,8 +1,8 @@
 use std::{collections::HashMap, os::unix::prelude::OsStringExt};
 
-use libp9cpu::{fstab::FsTab, EnvVar, P9cpuCommand};
 use anyhow::Result;
 use clap::Parser;
+use libp9cpu::{fstab::FsTab, EnvVar, P9cpuCommand};
 use tokio::io::AsyncBufReadExt;
 
 #[derive(clap::ValueEnum, Clone, Debug)]

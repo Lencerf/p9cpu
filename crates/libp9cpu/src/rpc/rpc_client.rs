@@ -17,8 +17,7 @@ use tower::service_fn;
 
 use super::PrependedStream;
 
-pub struct TryOrErrInto<F>
-{
+pub struct TryOrErrInto<F> {
     future: F,
 }
 

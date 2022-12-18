@@ -238,7 +238,7 @@ where
             let (ninep_tx, ninep_rx) = mpsc::channel(1);
             // ninep_tx.send(<Inner as ClientInnerT>::NinepInStreamItem::from(vec![])).await;
             let ninep_in_stream = ReceiverStream::from(ninep_rx);
-            let ninep_out_stream =  self
+            let ninep_out_stream = self
                 .inner
                 .ninep_forward(sid.clone(), ninep_in_stream)
                 .await?;

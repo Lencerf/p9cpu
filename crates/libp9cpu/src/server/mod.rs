@@ -303,11 +303,11 @@ where
         if sessions.contains_key(&sid) {
             return Err(P9cpuServerError::DuplicateId);
         }
-        let handles = vec![];
+        let mut handles = vec![];
         let mut ninep_port = None;
-        if let Some((port, _handle)) = ninep.write().await.take() {
+        if let Some((port, handle)) = ninep.write().await.take() {
             ninep_port = Some(port);
-            // handles.push(handle);
+            handles.push(handle);
         }
         let (mut cmd, pty_master) = self.make_cmd(command, ninep_port)?;
         println!("make command is done, will spawn");
