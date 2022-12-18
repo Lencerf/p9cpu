@@ -20,7 +20,7 @@ use tokio::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::{
         mpsc::{self, Receiver},
-        RwLock,
+        oneshot, RwLock,
     },
     task::JoinHandle,
 };
@@ -99,7 +99,7 @@ pub struct Session {
 
 #[derive(Debug)]
 pub struct PendingSession {
-    ninep: Arc<RwLock<Option<(u16, RawFd, JoinHandle<()>)>>>,
+    ninep: Arc<RwLock<Option<(u16, JoinHandle<()>)>>>,
 }
 
 #[derive(Error, Debug)]
@@ -205,77 +205,64 @@ where
         &self,
         command: P9cpuCommand,
         ninep_port: Option<u16>,
-        listener_fd: Option<RawFd>,
     ) -> Result<(Command, Option<File>), P9cpuServerError> {
-        // println!("get p9cpucmmand = {:?}", &command);
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
-        // let mut user = None;
+        let mut user = "nouser".to_string();
+        let mut pwd = None;
         for env in command.env {
-            // println!(
-            //     "{} {}",
-            //     String::from_utf8_lossy(&env.key),
-            //     String::from_utf8_lossy(&env.val)
-            // );
-            if env.key.starts_with(b"USER") {
-                println!("find user {:?} {:?}", &env.key, &env.val);
-            }
             cmd.env(OsStr::from_bytes(&env.key), OsStr::from_bytes(&env.val));
+            match env.key.as_slice() {
+                b"USER" => {
+                    if let Ok(s) = String::from_utf8(env.val) {
+                        user = s;
+                    }
+                }
+                b"PWD" => {
+                    if let Ok(s) = CString::new(env.val) {
+                        pwd = Some(s);
+                    }
+                }
+                _ => {}
+            }
         }
-        // cmd.env("TERM", "ansi");
 
         unsafe {
             cmd.pre_exec(move || {
-                return Err(std::io::Error::from_raw_os_error(1));
-                // for fd in 3..=11 {
-                //     libc::close(fd);
-                // }
-                // if let Some(fd) = listener_fd {
-                //     let ret = libc::close(fd);
-                //     if ret != 0 {
-                //         return Err(std::io::Error::last_os_error());
-                //     }
-                // }
-                // close_fds::close_open_fds(3, &[17]);
-                // close_fds::close_open_fds(3, &[17]);
+                close_fds::set_fds_cloexec(3, &[]);
                 Ok(())
             });
         }
-        // pre_exec::create_private_root(&mut cmd);
+        pre_exec::create_private_root(&mut cmd);
         if let Some(tmp_mnt) = command.tmp_mnt {
             if !command.namespace.is_empty() {
                 let Some(ninep_port) = ninep_port else {
                     return Err(P9cpuServerError::No9pPort);
                 };
-                // cmd_mount_namespace(&mut cmd, command.namespace, tmp_mnt, ninep_port);
-                pre_exec::create_namespace_9p(&mut cmd, command.namespace, tmp_mnt, ninep_port, "changyuanl")?;
+                pre_exec::create_namespace_9p(
+                    &mut cmd,
+                    command.namespace,
+                    tmp_mnt,
+                    ninep_port,
+                    &user,
+                )?;
             }
-            // cmd_mount_fstab(&mut cmd, command.fstab)?;
         }
         pre_exec::mount_fstab(&mut cmd, command.fstab)?;
-        // unsafe {
-        //     cmd.pre_exec(|| {
-        //         nix::unistd::chdir("/bin")?;
-        //         // std/src/sys/unix/process/process_unix.rs do_exec()
-        //         if let Ok(pwd) = std::env::var("PWD") {
-        //             std::env::set_current_dir("/bin")?;
-        //         } else {
-        //             return Err(std::io::Error::from_raw_os_error(3));
-        //         }
-        //         Ok(())
-        //     });
-        // };
+        if let Some(pwd) = pwd {
+            unsafe {
+                cmd.pre_exec(move || {
+                    nix::unistd::chdir(pwd.as_c_str())?;
+                    Ok(())
+                });
+            }
+        }
         println!("tmp mnt is done");
         let pty_master = if command.tty {
-            let result =
-                nix::pty::openpty(None, None).map_err(P9cpuServerError::OpenPtyFail)?;
+            let result = nix::pty::openpty(None, None).map_err(P9cpuServerError::OpenPtyFail)?;
             let stdin = unsafe { std::fs::File::from_raw_fd(result.slave) };
-            let stdout = stdin
-                .try_clone()
-                .map_err(P9cpuServerError::FdCloneFail)?;
-            let stderr = stdin
-                .try_clone()
-                .map_err(P9cpuServerError::FdCloneFail)?;
+            let stdout = stdin.try_clone().map_err(P9cpuServerError::FdCloneFail)?;
+            let stderr = stdin.try_clone().map_err(P9cpuServerError::FdCloneFail)?;
             // Stdio::
             cmd.stdin(stdin).stdout(stdout).stderr(stderr);
             unsafe {
@@ -318,27 +305,29 @@ where
         }
         let mut handles = vec![];
         let mut ninep_port = None;
-        let mut listener_fd = None;
-        if let Some((port, fd, handle)) = ninep.write().await.take() {
+        if let Some((port, handle)) = ninep.write().await.take() {
             ninep_port = Some(port);
-            listener_fd = Some(fd);
-            handles.push(handle);
+            // handles.push(handle);
         }
-        let (mut cmd, pty_master) = self.make_cmd(command, ninep_port, listener_fd)?;
+        let (mut cmd, pty_master) = self.make_cmd(command, ninep_port)?;
         println!("make command is done, will spawn");
-        let mut child;
-        match cmd.spawn() {
-            Ok(c) => child = c,
-            Err(e) => {
-                if let Some(mut master) = pty_master {
-                    let mut buf = vec![0;128];
-                    let len = master.read(&mut buf).await.map_err(P9cpuServerError::StdIo)?;
-                    println!("child spawn fail, output from master = {}, len = {}", String::from_utf8_lossy(&buf[0..len]), len);
-                }
-                return Err(P9cpuServerError::SpawnFail(e));
-            }
-        }
-        // let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
+        let mut child = if ninep_port.is_some() {
+            let (tx, rx) = oneshot::channel();
+            let f = async move {
+                let child = cmd.spawn().map_err(P9cpuServerError::SpawnFail);
+                tx.send(child).unwrap();
+            };
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(f);
+            });
+            rx.await.unwrap()
+        } else {
+            cmd.spawn().map_err(P9cpuServerError::SpawnFail)
+        }?;
         println!("spawn command is done");
         let (stdin, stdout, stderr) = if let Some(master) = pty_master {
             let c = master.try_clone().await.unwrap();
@@ -437,9 +426,14 @@ where
             .map(|addr| addr.port())
             .map_err(|_| P9cpuServerError::BindFail)?;
         let listener_fd = listener.as_raw_fd();
-        println!("started listener on {:?}, fd={}", listener.local_addr(), listener_fd);
+        println!(
+            "started listener on {:?}, fd={}",
+            listener.local_addr(),
+            listener_fd
+        );
         let (tx, rx) = mpsc::channel(10);
-        let handle = tokio::spawn(async move {
+        let f = async move {
+            println!("forwarding thread started");
             let Ok((mut stream, peer)) = listener.accept().await else {
                 println!("get stream fail");
                 return;
@@ -480,8 +474,9 @@ where
                     }
                 }
             }
-        });
-        *session.ninep.write().await = Some((port, listener_fd, handle));
+        };
+        let handle = tokio::spawn(f);
+        *session.ninep.write().await = Some((port, handle));
         Ok(rx)
     }
 
@@ -491,6 +486,7 @@ where
             Ok(status) => status.code().ok_or(P9cpuServerError::NoReturnCode),
             Err(e) => Err(P9cpuServerError::CommandError(e)),
         };
+        println!("child is done");
         let handles = self.get_session(sid, |s| s.handles.clone()).await?;
         for handle in handles.write().await.iter_mut() {
             if let Err(e) = handle.await {

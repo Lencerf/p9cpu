@@ -108,26 +108,26 @@ pub fn create_namespace_9p(
         ninep_port, user
     );
     let ninp_opt_c = CString::new(ninep_opt).map_err(c_str_op)?;
-    // mount_params.push(MountParams {
-    //     source: Some(CString::new("127.0.0.1").unwrap()),
-    //     target: ninp_mount_c,
-    //     fstype: Some(CString::new("9p").unwrap()),
-    //     flags: MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
-    //     data: Some(ninp_opt_c),
-    // });
-    // for (target, mut source) in namespace.iter() {
-    //     if source.is_empty() {
-    //         source = target;
-    //     }
-    //     let local_source = format!("{}{}", &ninep_mount, source);
-    //     mount_params.push(MountParams {
-    //         source: Some(CString::new(local_source).unwrap()),
-    //         target: CString::new(target.to_owned()).unwrap(),
-    //         fstype: None,
-    //         flags: MsFlags::MS_BIND,
-    //         data: None,
-    //     });
-    // }
+    mount_params.push(MountParams {
+        source: Some(CString::new("127.0.0.1").unwrap()),
+        target: ninp_mount_c,
+        fstype: Some(CString::new("9p").unwrap()),
+        flags: MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+        data: Some(ninp_opt_c),
+    });
+    for (target, mut source) in namespace.iter() {
+        if source.is_empty() {
+            source = target;
+        }
+        let local_source = format!("{}{}", &ninep_mount, source);
+        mount_params.push(MountParams {
+            source: Some(CString::new(local_source).unwrap()),
+            target: CString::new(target.to_owned()).unwrap(),
+            fstype: None,
+            flags: MsFlags::MS_BIND,
+            data: None,
+        });
+    }
 
     let op = move || {
         for param in &mount_params {
