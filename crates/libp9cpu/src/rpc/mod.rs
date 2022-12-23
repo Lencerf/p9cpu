@@ -29,6 +29,25 @@ impl AsBytes<'_> for P9cpuBytes {
     }
 }
 
+impl From<P9cpuBytes> for Vec<u8> {
+    fn from(b: P9cpuBytes) -> Self {
+        b.data
+    }
+}
+
+impl From<Byte> for u8 {
+    fn from(byte: Byte) -> Self {
+        byte.b as u8
+    }
+}
+
+impl From<u8> for TtyinRequest {
+    fn from(byte: u8) -> Self {
+        TtyinRequest { id: None, b: byte as u32 }
+    }
+}
+
+
 impl AsBytes<'_> for P9cpuStdinRequest {
     fn as_bytes(&self) -> &[u8] {
         self.data.as_slice()

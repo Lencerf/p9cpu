@@ -4,6 +4,7 @@ use super::{
     PrependedStream, StartRequest,
 };
 use crate::rpc::p9cpu_server;
+use crate::rpc;
 use crate::server::P9cpuServerInner;
 use crate::Addr;
 use anyhow::Result;
@@ -91,7 +92,16 @@ fn vec_to_uuid(v: &Vec<u8>) -> Result<uuid::Uuid, Status> {
 impl P9cpu for P9cpuService {
     type StdoutStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
     type StderrStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
+    type TtyoutStream = Pin<Box<dyn Stream<Item = Result<rpc::Byte, Status>> + Send>>;
     type NinepForwardStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
+
+    async fn ttyin(&self, request: Request<Streaming<rpc::TtyinRequest>>) -> RpcResult<Empty> {
+        unimplemented!()
+    }
+
+    async fn ttyout(&self, request: Request<P9cpuSessionId>) -> RpcResult<Self::TtyoutStream> {
+        unimplemented!()
+    }
 
     async fn start(&self, request: Request<StartRequest>) -> RpcResult<Empty> {
         let StartRequest { id, cmd: Some(cmd) } = request.into_inner() else {

@@ -10,6 +10,7 @@ use crate::{AsBytes, IntoByteVec};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Future;
+use futures::TryStreamExt;
 use futures::{Stream, StreamExt};
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -20,38 +21,83 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
 
 #[async_trait]
-pub trait ClientInnerT {
-    type Error: Sync + Send + std::error::Error + 'static;
+pub trait ClientInnerT2 {
+    type Error: std::error::Error + Sync + Send + Into<std::io::Error> + 'static;
     type SessionId: Clone + Debug + Sync + Send + 'static;
+
     async fn dial(&mut self) -> Result<Self::SessionId, Self::Error>;
+
     async fn start(
         &mut self,
         sid: Self::SessionId,
         command: P9cpuCommand,
     ) -> Result<(), Self::Error>;
 
-    async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
+    type ByteStream: Stream<Item = Result<u8, Self::Error>> + Unpin + 'static;
+    async fn ttyout(&mut self, sid: Self::SessionId) -> Result<Self::ByteStream, Self::Error>;
 
-    type OutStream: Send + 'static + Stream + Unpin;
-    async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
-    async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
+    type EmptyFuture: Future<Output = Result<(), Self::Error>> + Send + 'static;
+    type TtyinItem: Send + 'static + From<u8>;
+    async fn ttyin(
+        &mut self,
+        sid: Self::SessionId,
+        stream: impl Stream<Item = Self::TtyinItem> + Send + Sync + 'static + Unpin,
+    ) -> Self::EmptyFuture;
 
-    type InStreamItem: Send + 'static + From<Vec<u8>>;
-    type StdinFuture: Future<Output = Result<(), Self::Error>> + Send;
+    type ByteVecStream: Stream<Item = Result<Vec<u8>, Self::Error>> + Unpin + Send + 'static;
+    async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
+    async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
+
+    type StdinItem: Send + 'static + From<Vec<u8>>;
     async fn stdin(
         &mut self,
         sid: Self::SessionId,
-        stream: impl Stream<Item = Self::InStreamItem> + Send + Sync + 'static + Unpin,
-    ) -> Self::StdinFuture;
+        stream: impl Stream<Item = Self::StdinItem> + Send + Sync + 'static + Unpin,
+    ) -> Self::EmptyFuture;
 
     type NinepInStreamItem: Send + 'static + From<Vec<u8>>;
-    type NinepOutStream: Send + 'static + Stream + Unpin;
     async fn ninep_forward(
         &mut self,
         sid: Self::SessionId,
         stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
-    ) -> Result<Self::NinepOutStream, Self::Error>;
+    ) -> Result<Self::ByteVecStream, Self::Error>;
+
+    async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
 }
+
+// #[async_trait]
+// pub trait ClientInnerT {
+//     type Error: Sync + Send + std::error::Error + 'static;
+//     type SessionId: Clone + Debug + Sync + Send + 'static;
+//     async fn dial(&mut self) -> Result<Self::SessionId, Self::Error>;
+//     async fn start(
+//         &mut self,
+//         sid: Self::SessionId,
+//         command: P9cpuCommand,
+//     ) -> Result<(), Self::Error>;
+
+//     async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
+
+//     type OutStream: Send + 'static + Stream + Unpin;
+//     async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
+//     async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::OutStream, Self::Error>;
+
+//     type InStreamItem: Send + 'static + From<Vec<u8>>;
+//     type StdinFuture: Future<Output = Result<(), Self::Error>> + Send + 'static;
+//     async fn stdin(
+//         &mut self,
+//         sid: Self::SessionId,
+//         stream: impl Stream<Item = Self::InStreamItem> + Send + Sync + 'static + Unpin,
+//     ) -> Self::StdinFuture;
+
+//     type NinepInStreamItem: Send + 'static + From<Vec<u8>>;
+//     type NinepOutStream: Send + 'static + Stream + Unpin;
+//     async fn ninep_forward(
+//         &mut self,
+//         sid: Self::SessionId,
+//         stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
+//     ) -> Result<Self::NinepOutStream, Self::Error>;
+// }
 
 struct StreamReader<S> {
     inner: S,
@@ -69,10 +115,10 @@ impl<S> StreamReader<S> {
     }
 }
 
-impl<'a, S, I> AsyncRead for StreamReader<S>
+impl<'a, S, Item> AsyncRead for StreamReader<S>
 where
-    S: Stream<Item = I> + Unpin,
-    I: IntoByteVec,
+    S: Stream<Item = Item> + Unpin,
+    Item: Into<Result<Vec<u8>, std::io::Error>>,
 {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -92,11 +138,16 @@ where
             } else {
                 match Pin::new(&mut self.inner).poll_next(cx) {
                     std::task::Poll::Ready(Some(item)) => {
-                        self.buffer = item.into_byte_vec();
-                        self.consumed = 0;
-                        if self.buffer.is_empty() {
-                            return std::task::Poll::Ready(Ok(()));
-                        }
+                        match item.into() {
+                            Ok(buffer) => {
+                                self.buffer = buffer;
+                                self.consumed = 0;
+                                if self.buffer.is_empty() {
+                                    return std::task::Poll::Ready(Ok(()));
+                                }
+                            }
+                            Err(e) => return std::task::Poll::Ready(Err(e.into())),
+                         }
                     }
                     std::task::Poll::Ready(None) => {
                         return std::task::Poll::Ready(Ok(()));
@@ -210,16 +261,16 @@ pub enum P9cpuClientError {
     AlreadyStarted,
 }
 
-pub struct P9cpuClient<Inner: ClientInnerT> {
+pub struct P9cpuClient<Inner: ClientInnerT2> {
     inner: Inner,
     session_info: Option<SessionInfo<Inner::SessionId>>,
 }
 
 impl<'a, Inner> P9cpuClient<Inner>
 where
-    Inner: ClientInnerT + Sync + Send + 'static,
-    <<Inner as ClientInnerT>::OutStream as Stream>::Item: crate::AsBytes<'a> + Sync + Send,
-    <<Inner as ClientInnerT>::NinepOutStream as Stream>::Item: IntoByteVec,
+    Inner: ClientInnerT2,
+    // <<Inner as ClientInnerT>::OutStream as Stream>::Item: crate::AsBytes<'a> + Sync + Send,
+    // <<Inner as ClientInnerT>::NinepOutStream as Stream>::Item: IntoByteVec,
 {
     pub async fn new(inner: Inner) -> Result<P9cpuClient<Inner>> {
         Ok(Self {
@@ -243,8 +294,10 @@ where
                 .ninep_forward(sid.clone(), ninep_in_stream)
                 .await?;
             println!("ninep forward established");
+            
+            // let reader = ninep_out_stream.map_err(|e| e.into()).into_async_read();
 
-            let reader = StreamReader::new(ninep_out_stream);
+            let reader = StreamReader::new(ninep_out_stream.map_err(|e| e.into()));
             let writer = SenderWriter::new(ninep_tx);
             // tokio_util::io::StreamReader::new(ninep_out_stream);
             let root = Path::new("/");
@@ -261,9 +314,16 @@ where
         let out_handle = tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();
             while let Some(item) = out_stream.next().await {
-                if stdout.write_all(item.as_bytes()).await.is_err() || stdout.flush().await.is_err()
-                {
-                    break;
+                match item {
+                    Ok(bytes) => {
+                        if stdout.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("stdout {:?}", e);
+                        break;
+                    }
                 }
             }
         });
@@ -271,12 +331,20 @@ where
         let error_handle = tokio::spawn(async move {
             let mut stderr = tokio::io::stderr();
             while let Some(item) = err_stream.next().await {
-                if stderr.write_all(item.as_bytes()).await.is_err() || stderr.flush().await.is_err()
-                {
-                    break;
+                match item {
+                    Ok(bytes) => {
+                        if stderr.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("stderr {:?}", e);
+                        break;
+                    }
                 }
             }
         });
+
         let (tx, rx) = mpsc::channel(1);
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let in_stream = ReceiverStream::new(rx);
