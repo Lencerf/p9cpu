@@ -25,6 +25,7 @@ tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = ["to
 vsock = "0.3.0"
 rust-9p = { path = "../9p", version = "*"}
 tokio-util = { version = "0.7.4", features = ["io"] }
+log = "0.4"
 
 [build-dependencies]
 tonic-build = "0.8.4"

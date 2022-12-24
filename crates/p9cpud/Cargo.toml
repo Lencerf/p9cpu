@@ -13,13 +13,15 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread","process","io-s
 tokio-stream = { version = "0.1.11", features = ["net"] }
 uuid = { version = "1.2.2", features = ["v4","fast-rng","macro-diagnostics"] }
 thiserror = "1"
-anyhow = "1"
+anyhow = { version = "1", features = ["backtrace"] }
 tower = "0.4.13"
 clap = { version = "4.0.29", features = ["derive"] }
 libc = "0.2.138"
 nix = "0.26.1"
 tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = ["tonic-conn"], rev = "e502caf"  }
 vsock = "0.3.0"
+flexi_logger = "0.24"
+log = "0.4"
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["clap"]

@@ -353,20 +353,32 @@ where
         Ok(())
     }
 
-    pub async fn stdin<'a, IS, Item>(
-        &self,
-        sid: &SID,
-        mut in_stream: IS,
-    ) -> Result<(), P9cpuServerError>
+    pub async fn ttyin<S>(&self, sid: &SID, mut in_stream: S) -> Result<(), P9cpuServerError>
     where
-        IS: Stream<Item = Item> + Unpin,
-        Item: AsBytes<'a>,
+        S: Stream<Item = u8> + Unpin,
     {
         let cmd_stdin = self.get_session(sid, |s| s.stdin.clone()).await?;
         let mut cmd_stdin = cmd_stdin.write().await;
         while let Some(item) = in_stream.next().await {
             cmd_stdin
-                .write_all(item.as_bytes())
+                .write_u8(item)
+                .await
+                .map_err(P9cpuServerError::StdIo)?;
+        }
+        Ok(())
+    }
+
+    pub async fn stdin(
+        &self,
+        sid: &SID,
+        mut in_stream: impl Stream<Item = Vec<u8>> + Unpin,
+    ) -> Result<(), P9cpuServerError>
+    {
+        let cmd_stdin = self.get_session(sid, |s| s.stdin.clone()).await?;
+        let mut cmd_stdin = cmd_stdin.write().await;
+        while let Some(item) = in_stream.next().await {
+            cmd_stdin
+                .write_all(&item)
                 .await
                 .map_err(P9cpuServerError::StdIo)?;
         }
@@ -378,7 +390,7 @@ where
         Item: FromVecu8 + Debug + Send + Sync + 'static,
     {
         let cmd_stdout = self.get_session(sid, |s| s.stdout.clone()).await?;
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(10);
         let out_handle = tokio::spawn(async move {
             let mut out = cmd_stdout.write().await;
             if let Err(_e) = send_buf(&mut *out, tx).await {}
@@ -393,7 +405,7 @@ where
         Item: FromVecu8 + Debug + Send + Sync + 'static,
     {
         let cmd_stderr = self.get_session(sid, |s| s.stderr.clone()).await?;
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(10);
         let err_handle = tokio::spawn(async move {
             let mut err = cmd_stderr.write().await;
             let Some(ref mut err) = &mut *err else {
@@ -504,10 +516,12 @@ where
     Item: Sync + Send + Debug + 'static + FromVecu8,
 {
     loop {
-        let mut buf = vec![0; 1];
-        if src.read(&mut buf).await? == 0 {
+        let mut buf = vec![0; 128];
+        let len = src.read(&mut buf).await?;
+        if len == 0 {
             break;
         }
+        buf.truncate(len);
         tx.send(Item::from_vec_u8(buf)).await?;
     }
     Ok(())

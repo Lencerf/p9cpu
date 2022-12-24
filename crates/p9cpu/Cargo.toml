@@ -13,7 +13,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread","process","io-s
 tokio-stream = { version = "0.1.11", features = ["net"] }
 uuid = { version = "1.2.2", features = ["v4","fast-rng","macro-diagnostics"] }
 thiserror = "1"
-anyhow = "1"
+anyhow = { version = "1", features = ["backtrace"] }
 tower = "0.4.13"
 clap = { version = "4.0.29", features = ["derive"] }
 tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = ["tonic-conn"], rev = "e502caf"  }

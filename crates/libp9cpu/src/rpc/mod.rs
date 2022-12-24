@@ -35,15 +35,9 @@ impl From<P9cpuBytes> for Vec<u8> {
     }
 }
 
-impl From<Byte> for u8 {
-    fn from(byte: Byte) -> Self {
-        byte.b as u8
-    }
-}
-
 impl From<u8> for TtyinRequest {
     fn from(byte: u8) -> Self {
-        TtyinRequest { id: None, b: byte as u32 }
+        TtyinRequest { id: None, byte: byte as u32 }
     }
 }
 
@@ -119,3 +113,4 @@ where
         }
     }
 }
+

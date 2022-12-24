@@ -189,31 +189,28 @@ impl crate::client::ClientInnerT2 for RpcInner {
         Ok(())
     }
 
-    type ByteStream = ByteStream<Streaming<rpc::Byte>>;
-    async fn ttyout(&mut self, sid: Self::SessionId) -> Result<Self::ByteStream, Self::Error> {
-        let request = crate::rpc::P9cpuSessionId {
-            id: sid.into_bytes().into(),
-        };
-        let out_stream = self.rpc_client.ttyout(request).await?.into_inner();
-        Ok(ByteStream { inner: out_stream })
-    }
-
     type EmptyFuture = TryOrErrInto<JoinHandle<Result<(), Self::Error>>>;
-    type TtyinItem = rpc::TtyinRequest;
     async fn ttyin(
         &mut self,
         sid: Self::SessionId,
-        mut stream: impl Stream<Item = Self::TtyinItem> + Send + Sync + 'static + Unpin,
+        mut stream: impl Stream<Item = u8> + Send + Sync + 'static + Unpin,
     ) -> Self::EmptyFuture {
         let channel = self.channel.clone();
         let handle = tokio::spawn(async move {
-            let Some(mut first_rq) = stream.next().await else {
+            let Some(first_byte) = stream.next().await else {
                 return Ok(());
             };
-            first_rq.id = Some(sid.into_bytes().into());
+            let first_req = rpc::TtyinRequest {
+                byte: first_byte as u32,
+                id: Some(sid.into_bytes().into()),
+            };
+            let req_stream = stream.map(|b| rpc::TtyinRequest {
+                byte: b as u32,
+                id: None,
+            });
             let stream = PrependedStream {
-                stream,
-                item: Some(first_rq),
+                stream: req_stream,
+                item: Some(first_req),
             };
             let mut stdin_client = rpc::p9cpu_client::P9cpuClient::new(channel);
             stdin_client.ttyin(stream).await?;
@@ -239,27 +236,27 @@ impl crate::client::ClientInnerT2 for RpcInner {
         Ok(ByteVecStream { inner: err_stream })
     }
 
-    type StdinItem = rpc::P9cpuStdinRequest;
     async fn stdin(
         &mut self,
         sid: Self::SessionId,
-        mut stream: impl Stream<Item = Self::StdinItem> + Send + Sync + 'static + Unpin,
+        mut stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Self::EmptyFuture {
         let channel = self.channel.clone();
         let handle = tokio::spawn(async move {
-            let Some(mut first_req) = stream.next().await else {
+            let Some(first_vec) = stream.next().await else {
                 return Ok(());
             };
-            first_req.id = Some(sid.into_bytes().into());
+            let first_req = rpc::P9cpuStdinRequest {
+                id: Some(sid.into_bytes().into()),
+                data: first_vec,
+            };
+            let req_stream = stream.map(|data| rpc::P9cpuStdinRequest { id: None, data });
             let stream = PrependedStream {
-                stream,
+                stream: req_stream,
                 item: Some(first_req),
             };
             let mut stdin_client = crate::rpc::p9cpu_client::P9cpuClient::new(channel);
-            stdin_client
-                .stdin(stream)
-                .await
-                .map_err(RpcInnerError::Rpc)?;
+            stdin_client.stdin(stream).await?;
             Ok(())
         });
         TryOrErrInto { future: handle }

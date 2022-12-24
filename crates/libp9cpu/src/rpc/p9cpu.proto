@@ -52,11 +52,7 @@ message P9cpuBytes {
 
 message TtyinRequest {
     optional bytes id = 1;
-    uint32 b = 2;
-}
-
-message Byte {
-    uint32 b = 1;
+    uint32 byte = 2;
 }
 
 message P9cpuWaitResponse {
@@ -75,7 +71,6 @@ service P9cpu {
     rpc Stdout (P9cpuSessionId) returns (stream P9cpuBytes);
     rpc Stderr (P9cpuSessionId) returns (stream P9cpuBytes);
     rpc Ttyin (stream TtyinRequest) returns (Empty);
-    rpc Ttyout (P9cpuSessionId) returns (stream Byte);
     rpc Wait (P9cpuSessionId) returns (P9cpuWaitResponse);
     rpc NinepForward (stream NinepForwardRequest) returns (stream P9cpuBytes);
 }
