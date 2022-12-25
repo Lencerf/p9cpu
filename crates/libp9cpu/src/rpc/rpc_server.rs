@@ -119,23 +119,23 @@ impl P9cpu for P9cpuService {
     type StderrStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
     type NinepForwardStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
 
-    async fn ttyin(&self, request: Request<Streaming<rpc::TtyinRequest>>) -> RpcResult<Empty> {
-        let mut in_stream = request.into_inner();
-        let Some(Ok(rpc::TtyinRequest { id: Some(id), byte:first_byte })) = in_stream.next().await else {
-            return Err(Status::invalid_argument("no session id."));
-        };
-        let sid = vec_to_uuid(&id)?;
-        let byte_stream = in_stream.scan((), |_state, req| match req {
-            Ok(r) => futures::future::ready(Some(r.byte as u8)),
-            Err(e) => futures::future::ready(None),
-        });
-        let stream = PrependedStream {
-            item: Some(first_byte as u8),
-            stream: byte_stream,
-        };
-        self.inner.ttyin(&sid, stream).await?;
-        Ok(Response::new(Empty {}))
-    }
+    // async fn ttyin(&self, request: Request<Streaming<rpc::TtyinRequest>>) -> RpcResult<Empty> {
+    //     let mut in_stream = request.into_inner();
+    //     let Some(Ok(rpc::TtyinRequest { id: Some(id), byte:first_byte })) = in_stream.next().await else {
+    //         return Err(Status::invalid_argument("no session id."));
+    //     };
+    //     let sid = vec_to_uuid(&id)?;
+    //     let byte_stream = in_stream.scan((), |_state, req| match req {
+    //         Ok(r) => futures::future::ready(Some(r.byte as u8)),
+    //         Err(e) => futures::future::ready(None),
+    //     });
+    //     let stream = PrependedStream {
+    //         item: Some(first_byte as u8),
+    //         stream: byte_stream,
+    //     };
+    //     self.inner.ttyin(&sid, stream).await?;
+    //     Ok(Response::new(Empty {}))
+    // }
 
     async fn start(&self, request: Request<StartRequest>) -> RpcResult<Empty> {
         let StartRequest { id, cmd: Some(cmd) } = request.into_inner() else {

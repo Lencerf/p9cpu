@@ -202,34 +202,34 @@ impl crate::client::ClientInnerT2 for RpcInner {
     }
 
     type EmptyFuture = TryOrErrInto<JoinHandle<Result<(), Self::Error>>>;
-    async fn ttyin(
-        &mut self,
-        sid: Self::SessionId,
-        mut stream: impl Stream<Item = u8> + Send + Sync + 'static + Unpin,
-    ) -> Self::EmptyFuture {
-        let channel = self.channel.clone();
-        let handle = tokio::spawn(async move {
-            let Some(first_byte) = stream.next().await else {
-                return Ok(());
-            };
-            let first_req = rpc::TtyinRequest {
-                byte: first_byte as u32,
-                id: Some(sid.into_bytes().into()),
-            };
-            let req_stream = stream.map(|b| rpc::TtyinRequest {
-                byte: b as u32,
-                id: None,
-            });
-            let stream = PrependedStream {
-                stream: req_stream,
-                item: Some(first_req),
-            };
-            let mut stdin_client = rpc::p9cpu_client::P9cpuClient::new(channel);
-            stdin_client.ttyin(stream).await?;
-            Ok(())
-        });
-        TryOrErrInto { future: handle }
-    }
+    // async fn ttyin(
+    //     &mut self,
+    //     sid: Self::SessionId,
+    //     mut stream: impl Stream<Item = u8> + Send + Sync + 'static + Unpin,
+    // ) -> Self::EmptyFuture {
+    //     let channel = self.channel.clone();
+    //     let handle = tokio::spawn(async move {
+    //         let Some(first_byte) = stream.next().await else {
+    //             return Ok(());
+    //         };
+    //         let first_req = rpc::TtyinRequest {
+    //             byte: first_byte as u32,
+    //             id: Some(sid.into_bytes().into()),
+    //         };
+    //         let req_stream = stream.map(|b| rpc::TtyinRequest {
+    //             byte: b as u32,
+    //             id: None,
+    //         });
+    //         let stream = PrependedStream {
+    //             stream: req_stream,
+    //             item: Some(first_req),
+    //         };
+    //         let mut stdin_client = rpc::p9cpu_client::P9cpuClient::new(channel);
+    //         stdin_client.ttyin(stream).await?;
+    //         Ok(())
+    //     });
+    //     TryOrErrInto { future: handle }
+    // }
 
     type ByteVecStream = ByteVecStream<Streaming<rpc::P9cpuBytes>>;
     async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error> {

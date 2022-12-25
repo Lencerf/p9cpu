@@ -36,11 +36,11 @@ pub trait ClientInnerT2 {
     // async fn ttyout(&mut self, sid: Self::SessionId) -> Result<Self::ByteStream, Self::Error>;
 
     type EmptyFuture: Future<Output = Result<(), Self::Error>> + Send + 'static;
-    async fn ttyin(
-        &mut self,
-        sid: Self::SessionId,
-        stream: impl Stream<Item = u8> + Send + Sync + 'static + Unpin,
-    ) -> Self::EmptyFuture;
+    // async fn ttyin(
+    //     &mut self,
+    //     sid: Self::SessionId,
+    //     stream: impl Stream<Item = u8> + Send + Sync + 'static + Unpin,
+    // ) -> Self::EmptyFuture;
 
     type ByteVecStream: Stream<Item = Vec<u8>> + Unpin + Send + 'static;
     async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
@@ -282,18 +282,27 @@ where
         })
     }
 
+    const STDIN_BUF_SIZE: usize = 128;
+
     async fn setup_stdio(
         &mut self,
         sid: Inner::SessionId,
+        tty: bool,
         mut stop_rx: broadcast::Receiver<()>,
     ) -> Result<Vec<JoinHandle<Result<(), P9cpuClientError>>>, Inner::Error> {
+        let mut handles = vec![];
+
         let out_stream = self.inner.stdout(sid.clone()).await?;
         let stdout = tokio::io::stdout();
         let out_handle = Self::copy_stream(out_stream, stdout, true);
+        handles.push(out_handle);
 
-        let err_stream = self.inner.stderr(sid.clone()).await?;
-        let stderr = tokio::io::stderr();
-        let err_handle = Self::copy_stream(err_stream, stderr, true);
+        if !tty {
+            let err_stream = self.inner.stderr(sid.clone()).await?;
+            let stderr = tokio::io::stderr();
+            let err_handle = Self::copy_stream(err_stream, stderr, true);
+            handles.push(err_handle);
+        }
 
         let (tx, rx) = mpsc::channel(1);
         // let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
@@ -302,7 +311,7 @@ where
         let in_handle = tokio::spawn(async move {
             let mut stdin = tokio::io::stdin();
             loop {
-                let mut buf = vec![0];
+                let mut buf = vec![0; Self::STDIN_BUF_SIZE];
                 let len = tokio::select! {
                     len = stdin.read(&mut buf) => len,
                     _ = stop_rx.recv() => break,
@@ -317,7 +326,8 @@ where
             stdin_future.await?;
             Ok(())
         });
-        Ok(vec![out_handle, err_handle, in_handle])
+        handles.push(in_handle);
+        Ok(handles)
     }
 
     fn copy_stream<D>(
@@ -340,50 +350,50 @@ where
         handle
     }
 
-    async fn setup_tty(
-        &mut self,
-        sid: Inner::SessionId,
-        mut stop_rx: broadcast::Receiver<()>,
-    ) -> Result<Vec<JoinHandle<Result<(), P9cpuClientError>>>, Inner::Error> {
-        // let mut out_stream = self.inner.ttyout(sid.clone()).await?;
-        // let mut stdout = tokio::io::stdout();
-        // let out_handle = tokio::spawn(async move {
-        //     while let Some(item) = out_stream.next().await {
-        //         let byte = item?;
-        //         stdout.write_u8(byte).await?;
-        //         stdout.flush().await?;
-        //     }
-        //     std::io::Result::Ok(())
-        // });
+    // async fn setup_tty(
+    //     &mut self,
+    //     sid: Inner::SessionId,
+    //     mut stop_rx: broadcast::Receiver<()>,
+    // ) -> Result<Vec<JoinHandle<Result<(), P9cpuClientError>>>, Inner::Error> {
+    //     // let mut out_stream = self.inner.ttyout(sid.clone()).await?;
+    //     // let mut stdout = tokio::io::stdout();
+    //     // let out_handle = tokio::spawn(async move {
+    //     //     while let Some(item) = out_stream.next().await {
+    //     //         let byte = item?;
+    //     //         stdout.write_u8(byte).await?;
+    //     //         stdout.flush().await?;
+    //     //     }
+    //     //     std::io::Result::Ok(())
+    //     // });
 
-        let out_stream = self.inner.stdout(sid.clone()).await?;
-        let stdout = tokio::io::stdout();
-        let out_handle = Self::copy_stream(out_stream, stdout, true);
+    //     let out_stream = self.inner.stdout(sid.clone()).await?;
+    //     let stdout = tokio::io::stdout();
+    //     let out_handle = Self::copy_stream(out_stream, stdout, true);
 
-        let (tx, rx) = mpsc::channel(1);
-        let in_stream = ReceiverStream::new(rx);
-        let ttyin_future = self.inner.ttyin(sid.clone(), in_stream).await;
-        let in_handle = tokio::spawn(async move {
-            let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
-            loop {
-                let mut buf = [0];
-                // let a = stdin.read_u8().await;
-                let len = tokio::select! {
-                    len = stdin.read(&mut buf) => len,
-                    _ = stop_rx.recv() => break,
-                }?;
-                if len == 0 {
-                    break;
-                }
-                tx.send(buf[0].into()).await?;
-            }
-            drop(tx);
-            ttyin_future.await?;
-            Ok(())
-        });
+    //     let (tx, rx) = mpsc::channel(1);
+    //     let in_stream = ReceiverStream::new(rx);
+    //     let ttyin_future = self.inner.ttyin(sid.clone(), in_stream).await;
+    //     let in_handle = tokio::spawn(async move {
+    //         let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    //         loop {
+    //             let mut buf = [0];
+    //             // let a = stdin.read_u8().await;
+    //             let len = tokio::select! {
+    //                 len = stdin.read(&mut buf) => len,
+    //                 _ = stop_rx.recv() => break,
+    //             }?;
+    //             if len == 0 {
+    //                 break;
+    //             }
+    //             tx.send(buf[0].into()).await?;
+    //         }
+    //         drop(tx);
+    //         ttyin_future.await?;
+    //         Ok(())
+    //     });
 
-        Ok(vec![out_handle, in_handle])
-    }
+    //     Ok(vec![out_handle, in_handle])
+    // }
 
     pub async fn start(&mut self, command: P9cpuCommand) -> Result<(), P9cpuClientError> {
         if self.session_info.is_some() {
@@ -418,11 +428,12 @@ where
         self.inner.start(sid.clone(), command).await?;
         println!("will set up stdio");
         let (stop_tx, stop_rx) = broadcast::channel(1);
-        let handles = if tty {
-            self.setup_tty(sid.clone(), stop_rx).await
-        } else {
-            self.setup_stdio(sid.clone(), stop_rx).await
-        }?;
+        // let handles = if tty {
+        //     self.setup_tty(sid.clone(), stop_rx).await
+        // } else {
+        //     self.setup_stdio(sid.clone(), stop_rx).await
+        // }?;
+        let handles = self.setup_stdio(sid.clone(), tty, stop_rx).await?;
         // let mut out_stream = self.inner.stdout(sid.clone()).await?;
         // let out_handle = tokio::spawn(async move {
         //     let mut stdout = tokio::io::stdout();

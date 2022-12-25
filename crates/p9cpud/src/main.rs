@@ -30,9 +30,9 @@ pub fn log_format(
     let level = record.level();
     write!(
         w,
-        "[{}] {:<5} [{}]: {}",
+        "[{}] {} [{}]: {}",
         now.format("%Y-%m-%d %H:%M:%S %:z"),
-        flexi_logger::style(level).paint(level.to_string()),
+        flexi_logger::style(level).paint(format!("{:<5}", level.to_string())),
         record.module_path().unwrap_or("<unnamed>"),
         &record.args()
     )
@@ -41,11 +41,7 @@ pub fn log_format(
 #[tokio::main]
 async fn main() -> Result<()> {
     Logger::try_with_env()?.format(log_format).start()?;
-    log::error!("f");
     log::info!("p9cpud started...");
-    log::warn!("dd");
-    log::debug!("da");
-    log::trace!("f");
     let args = Args::parse();
     let server = libp9cpu::server::rpc_based();
     let addr = match args.net {

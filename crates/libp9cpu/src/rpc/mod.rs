@@ -33,14 +33,14 @@ impl From<P9cpuBytes> for Vec<u8> {
     }
 }
 
-impl From<u8> for TtyinRequest {
-    fn from(byte: u8) -> Self {
-        TtyinRequest {
-            id: None,
-            byte: byte as u32,
-        }
-    }
-}
+// impl From<u8> for TtyinRequest {
+//     fn from(byte: u8) -> Self {
+//         TtyinRequest {
+//             id: None,
+//             byte: byte as u32,
+//         }
+//     }
+// }
 
 // impl AsBytes<'_> for P9cpuStdinRequest {
 //     fn as_bytes(&self) -> &[u8] {

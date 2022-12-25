@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     ffi::{CString, OsStr},
-    fmt::Debug,
+    fmt::{Debug, Display},
     hash::Hash,
     os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt},
     pin::Pin,
@@ -122,8 +122,8 @@ pub enum P9cpuServerError {
     MkDir(std::io::Error),
     #[error("Invalid FsTab: {0}")]
     InvalidFsTab(String),
-    #[error("Cannot bind listener")]
-    BindFail,
+    #[error("Cannot bind listener: {0}")]
+    BindFail(std::io::Error),
     #[error("9p forward not setup")]
     No9pPort,
     #[error("String contains null: {0:?}")]
@@ -196,7 +196,7 @@ pub struct P9cpuServerInner<I> {
 
 impl<SID> P9cpuServerInner<SID>
 where
-    SID: Eq + Hash + Debug,
+    SID: Eq + Hash + Debug + Display + Sync + Send + Clone + 'static,
 {
     async fn get_session<O, R>(&self, sid: &SID, op: O) -> Result<R, P9cpuServerError>
     where
@@ -263,13 +263,11 @@ where
                 });
             }
         }
-        println!("tmp mnt is done");
         let pty_master = if command.tty {
             let result = nix::pty::openpty(None, None).map_err(P9cpuServerError::OpenPtyFail)?;
             let stdin = unsafe { std::fs::File::from_raw_fd(result.slave) };
             let stdout = stdin.try_clone().map_err(P9cpuServerError::FdCloneFail)?;
             let stderr = stdin.try_clone().map_err(P9cpuServerError::FdCloneFail)?;
-            // Stdio::
             cmd.stdin(stdin).stdout(stdout).stderr(stderr);
             unsafe {
                 cmd.pre_exec(|| {
@@ -297,6 +295,7 @@ where
         let session = PendingSession {
             ninep: Arc::new(RwLock::new(None)),
         };
+        log::info!("Session {} created", &sid);
         pending.insert(sid, session);
         Ok(())
     }
@@ -317,28 +316,30 @@ where
         }
         let (mut cmd, pty_master) = self.make_cmd(command, ninep_port)?;
         println!("make command is done, will spawn");
-        let mut child = if ninep_port.is_some() {
-            let (tx, rx) = oneshot::channel();
-            let f = async move {
-                let child = cmd.spawn().map_err(P9cpuServerError::SpawnFail);
-                tx.send(child).unwrap();
-            };
-            std::thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                runtime.block_on(f);
-            });
-            rx.await.unwrap()
-        } else {
-            cmd.spawn().map_err(P9cpuServerError::SpawnFail)
-        }?;
+        // let mut child = if ninep_port.is_some() {
+        //     let (tx, rx) = oneshot::channel();
+        //     let f = async move {
+        //         let child = cmd.spawn().map_err(P9cpuServerError::SpawnFail);
+        //         tx.send(child).unwrap();
+        //     };
+        //     std::thread::spawn(move || {
+        //         let runtime = tokio::runtime::Builder::new_current_thread()
+        //             .enable_all()
+        //             .build()
+        //             .unwrap();
+        //         runtime.block_on(f);
+        //     });
+        //     rx.await.unwrap()
+        // } else {
+        //     cmd.spawn().map_err(P9cpuServerError::SpawnFail)
+        // }?;
+        let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
         println!("spawn command is done");
         let (stdin, stdout, stderr) = if let Some(master) = pty_master {
             let c = master.try_clone().await.unwrap();
             (StdinWriter::Pty(master), StdoutReader::Pty(c), None)
         } else {
+            log::info!("tty is not used");
             let stdin = child.stdin.take().unwrap();
             let stdout = child.stdout.take().unwrap();
             let stderr = child.stderr.take();
@@ -355,22 +356,8 @@ where
             child: Arc::new(RwLock::new(child)),
             handles: Arc::new(RwLock::new(handles)),
         };
+        log::info!("Session {} started", &sid);
         sessions.insert(sid, info);
-        Ok(())
-    }
-
-    pub async fn ttyin<S>(&self, sid: &SID, mut in_stream: S) -> Result<(), P9cpuServerError>
-    where
-        S: Stream<Item = u8> + Unpin,
-    {
-        let cmd_stdin = self.get_session(sid, |s| s.stdin.clone()).await?;
-        let mut cmd_stdin = cmd_stdin.write().await;
-        while let Some(item) = in_stream.next().await {
-            cmd_stdin
-                .write_u8(item)
-                .await
-                .map_err(P9cpuServerError::IoErr)?;
-        }
         Ok(())
     }
 
@@ -381,6 +368,7 @@ where
     ) -> Result<(), P9cpuServerError> {
         let cmd_stdin = self.get_session(sid, |s| s.stdin.clone()).await?;
         let mut cmd_stdin = cmd_stdin.write().await;
+        log::debug!("Session {} stdin stream started", sid);
         while let Some(item) = in_stream.next().await {
             cmd_stdin
                 .write_all(&item)
@@ -411,8 +399,10 @@ where
     ) -> Result<impl Stream<Item = Vec<u8>>, P9cpuServerError> {
         let cmd_stdout = self.get_session(sid, |s| s.stdout.clone()).await?;
         let (tx, rx) = mpsc::channel(10);
+        let sid_copy = sid.clone();
         let out_handle = tokio::spawn(async move {
             let mut out = cmd_stdout.write().await;
+            log::debug!("Session {} stdout stream started", &sid_copy);
             Self::copy_to(&mut *out, tx).await
         });
         let handles = self.get_session(sid, |s| s.handles.clone()).await?;
@@ -432,6 +422,7 @@ where
                 break;
             }
             buf.truncate(len);
+            log::info!("buf={}", String::from_utf8_lossy(&buf));
             tx.send(buf).await?;
         }
         Ok(())
@@ -443,11 +434,14 @@ where
     ) -> Result<impl Stream<Item = Vec<u8>>, P9cpuServerError> {
         let cmd_stderr = self.get_session(sid, |s| s.stderr.clone()).await?;
         let (tx, rx) = mpsc::channel(10);
+        let sid_copy = sid.clone();
         let err_handle = tokio::spawn(async move {
             let mut err = cmd_stderr.write().await;
             let Some(ref mut err) = &mut *err else {
+                log::info!("Session {} has no stderr", &sid_copy);
                 return Ok(());
             };
+            log::debug!("Session {} stderr stream started", &sid_copy);
             Self::copy_to(&mut *err, tx).await
         });
         let handles = self.get_session(sid, |s| s.handles.clone()).await?;
@@ -498,27 +492,64 @@ where
     ) -> Result<impl Stream<Item = Vec<u8>>, P9cpuServerError> {
         let pending = self.pending.write().await;
         let session = pending.get(sid).ok_or(P9cpuServerError::SessionNotExist)?;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|_| P9cpuServerError::BindFail)?;
-        let port = listener
-            .local_addr()
-            .map(|addr| addr.port())
-            .map_err(|_| P9cpuServerError::BindFail)?;
-        let listener_fd = listener.as_raw_fd();
-        println!(
-            "started listener on {:?}, fd={}",
-            listener.local_addr(),
-            listener_fd
-        );
+        let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, 1), 0);
+        let listener = std::net::TcpListener::bind(addr).map_err(P9cpuServerError::BindFail)?;
+        let port = match listener.local_addr() {
+            Ok(addr) => Ok(addr.port()),
+            Err(e) => Err(P9cpuServerError::BindFail(e)),
+        }?;
+        log::info!("Session {}: started 9p listener on 127.0.0.1:{}", sid, port);
+        let (tcp_listener_tx, mut tcp_listener_rx) = mpsc::channel(1);
+        std::thread::spawn(move || {
+            async fn accept_timeout(
+                std_listener: std::net::TcpListener,
+                duration: std::time::Duration,
+            ) -> Result<(std::net::TcpStream, std::net::SocketAddr), std::io::Error> {
+                std_listener.set_nonblocking(true)?;
+                let listener = tokio::net::TcpListener::from_std(std_listener)?;
+                let sleep = tokio::time::sleep(duration);
+                let maybe_peer = tokio::select! {
+                    () = sleep => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "")),
+                    maybe_peer = listener.accept() => maybe_peer,
+                };
+                maybe_peer.and_then(|(stream, peer)| {
+                    let std_stream = stream.into_std()?;
+                    Ok((std_stream, peer))
+                })
+            }
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let ret =
+                runtime.block_on(accept_timeout(listener, std::time::Duration::from_secs(60)));
+            if tcp_listener_tx.blocking_send(ret).is_err() {
+                log::error!("tcp_listener_rx is main runtime is down");
+            }
+        });
+
         let (tx, rx) = mpsc::channel(10);
+        let sid_copy = sid.clone();
+        // std::os::linux::net::TcpStreamExt
         let f = async move {
             println!("forwarding thread started");
-            let Ok((mut stream, peer)) = listener.accept().await else {
-                println!("get stream fail");
-                return Ok(());
+            let Some(maybe_peer) = tcp_listener_rx.recv().await else {
+                return Err(P9cpuServerError::ChannelClosed);
             };
-            println!("get ninep request from client {:?}", peer);
+            let Ok((std_stream, peer)) = maybe_peer else {
+                println!("get stream fail");
+                return Ok::<(), P9cpuServerError>(());
+            };
+            log::info!(
+                "Session {}: get 9p request from client {:?}",
+                &sid_copy,
+                peer
+            );
+            std_stream
+                .set_nonblocking(true)
+                .map_err(P9cpuServerError::IoErr)?;
+            let mut stream =
+                tokio::net::TcpStream::from_std(std_stream).map_err(P9cpuServerError::IoErr)?;
             let (mut reader, mut writer) = stream.split();
             loop {
                 let mut buf = vec![0; 128];
@@ -526,7 +557,7 @@ where
                     len = reader.read(&mut buf) => {
                         let len = len.map_err(P9cpuServerError::IoErr)?;
                         if len == 0 {
-                            println!("buf from reader is 0");
+                            log::info!("buf from reader is 0");
                             break;
                         }
                         buf.truncate(len);
@@ -534,19 +565,37 @@ where
                     }
                     in_item = in_stream.next() => {
                         let Some(in_item) = in_item else {
-                            println!("in item is none");
+                            log::info!("in item is none");
                             break
                         };
                         let len = writer.write(&in_item).await.map_err(P9cpuServerError::IoErr)?;
                         if len == 0 {
-                            println!("send bytes to os client is o");
+                            log::info!("send bytes to os client is o");
                             break;
                         }
                     }
                 }
             }
+            log::info!("Session {}: 9p is done.", &sid_copy);
             Ok(())
         };
+        // let (result_tx, mut result_rx) = mpsc::channel(1);
+        // std::thread::spawn(move || {
+        //     let runtime = tokio::runtime::Builder::new_current_thread()
+        //         .enable_all()
+        //         .build()
+        //         .unwrap();
+        //     let ret = runtime.block_on(f);
+        //     if result_tx.blocking_send(ret).is_err() {
+        //         log::error!("RX in main thread is down");
+        //     }
+        // });
+        // let handle = tokio::spawn(async move {
+        //     match result_rx.recv().await {
+        //         Some(ret) => ret,
+        //         None => Err(P9cpuServerError::ChannelClosed),
+        //     }
+        // });
         let handle = tokio::spawn(f);
         *session.ninep.write().await = Some((port, handle));
         Ok(ReceiverStream::new(rx))
@@ -566,6 +615,7 @@ where
             }
         }
         self.sessions.write().await.remove(sid);
+        log::info!("Session {} is done", &sid);
         ret
     }
 }
