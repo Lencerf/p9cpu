@@ -6,7 +6,6 @@ use std::vec;
 use crate::rpc;
 use crate::Addr;
 use crate::P9cpuCommand;
-use crate::{AsBytes, IntoByteVec};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Future;
@@ -17,7 +16,6 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::broadcast;
-use tokio::sync::oneshot;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -44,7 +42,7 @@ pub trait ClientInnerT2 {
         stream: impl Stream<Item = u8> + Send + Sync + 'static + Unpin,
     ) -> Self::EmptyFuture;
 
-    type ByteVecStream: Stream<Item = Result<Vec<u8>, Self::Error>> + Unpin + Send + 'static;
+    type ByteVecStream: Stream<Item = Vec<u8>> + Unpin + Send + 'static;
     async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
     async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
 
@@ -54,11 +52,10 @@ pub trait ClientInnerT2 {
         stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Self::EmptyFuture;
 
-    type NinepInStreamItem: Send + 'static + From<Vec<u8>>;
     async fn ninep_forward(
         &mut self,
         sid: Self::SessionId,
-        stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
+        stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Result<Self::ByteVecStream, Self::Error>;
 
     async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
@@ -117,7 +114,7 @@ impl<S> StreamReader<S> {
 impl<'a, S, Item> AsyncRead for StreamReader<S>
 where
     S: Stream<Item = Item> + Unpin,
-    Item: Into<Result<Vec<u8>, std::io::Error>>,
+    Item: Into<Vec<u8>>,
 {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -136,16 +133,13 @@ where
                 return std::task::Poll::Ready(Ok(()));
             } else {
                 match Pin::new(&mut self.inner).poll_next(cx) {
-                    std::task::Poll::Ready(Some(item)) => match item.into() {
-                        Ok(buffer) => {
-                            self.buffer = buffer;
-                            self.consumed = 0;
-                            if self.buffer.is_empty() {
-                                return std::task::Poll::Ready(Ok(()));
-                            }
+                    std::task::Poll::Ready(Some(item)) => {
+                        self.buffer = item.into();
+                        self.consumed = 0;
+                        if self.buffer.is_empty() {
+                            return std::task::Poll::Ready(Ok(()));
                         }
-                        Err(e) => return std::task::Poll::Ready(Err(e.into())),
-                    },
+                    }
                     std::task::Poll::Ready(None) => {
                         return std::task::Poll::Ready(Ok(()));
                     }
@@ -243,7 +237,7 @@ where
 
 struct SessionInfo<S> {
     sid: S,
-    handles: Vec<JoinHandle<std::io::Result<()>>>,
+    handles: Vec<JoinHandle<Result<(), P9cpuClientError>>>,
     stop_tx: broadcast::Sender<()>,
     tty: bool,
 }
@@ -256,6 +250,18 @@ pub enum P9cpuClientError {
     NonZeroExitCode(i32),
     #[error("Command already started")]
     AlreadyStarted,
+    #[error("IO Error {0}")]
+    IoErr(#[from] std::io::Error),
+    #[error("Inner {0}")]
+    Inner(Box<dyn std::error::Error + Sync + Send + 'static>),
+    #[error("Channel closed.")]
+    ChannelClosed,
+}
+
+impl<T> From<mpsc::error::SendError<T>> for P9cpuClientError {
+    fn from(_: mpsc::error::SendError<T>) -> Self {
+        P9cpuClientError::ChannelClosed
+    }
 }
 
 pub struct P9cpuClient<Inner: ClientInnerT2> {
@@ -267,6 +273,7 @@ impl<'a, Inner> P9cpuClient<Inner>
 where
     Inner: ClientInnerT2,
     std::io::Error: From<<Inner as ClientInnerT2>::Error>,
+    P9cpuClientError: From<Inner::Error>,
 {
     pub async fn new(inner: Inner) -> Result<P9cpuClient<Inner>> {
         Ok(Self {
@@ -279,7 +286,7 @@ where
         &mut self,
         sid: Inner::SessionId,
         mut stop_rx: broadcast::Receiver<()>,
-    ) -> Result<Vec<JoinHandle<std::io::Result<()>>>, Inner::Error> {
+    ) -> Result<Vec<JoinHandle<Result<(), P9cpuClientError>>>, Inner::Error> {
         let out_stream = self.inner.stdout(sid.clone()).await?;
         let stdout = tokio::io::stdout();
         let out_handle = Self::copy_stream(out_stream, stdout, true);
@@ -304,13 +311,11 @@ where
                     break;
                 }
                 buf.truncate(len);
-                tx.send(buf.into())
-                    .await
-                    .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+                tx.send(buf.into()).await?;
             }
             drop(tx);
             stdin_future.await?;
-            std::io::Result::Ok(())
+            Ok(())
         });
         Ok(vec![out_handle, err_handle, in_handle])
     }
@@ -319,13 +324,12 @@ where
         mut src: Inner::ByteVecStream,
         mut dst: D,
         flush: bool,
-    ) -> JoinHandle<std::io::Result<()>>
+    ) -> JoinHandle<Result<(), P9cpuClientError>>
     where
         D: AsyncWrite + Unpin + Send + 'static,
     {
         let handle = tokio::spawn(async move {
-            while let Some(item) = src.next().await {
-                let bytes = item?;
+            while let Some(bytes) = src.next().await {
                 dst.write_all(&bytes).await?;
                 if flush {
                     dst.flush().await?;
@@ -340,7 +344,7 @@ where
         &mut self,
         sid: Inner::SessionId,
         mut stop_rx: broadcast::Receiver<()>,
-    ) -> Result<Vec<JoinHandle<std::io::Result<()>>>, Inner::Error> {
+    ) -> Result<Vec<JoinHandle<Result<(), P9cpuClientError>>>, Inner::Error> {
         // let mut out_stream = self.inner.ttyout(sid.clone()).await?;
         // let mut stdout = tokio::io::stdout();
         // let out_handle = tokio::spawn(async move {
@@ -371,19 +375,17 @@ where
                 if len == 0 {
                     break;
                 }
-                tx.send(buf[0].into())
-                    .await
-                    .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+                tx.send(buf[0].into()).await?;
             }
             drop(tx);
             ttyin_future.await?;
-            std::io::Result::Ok(())
+            Ok(())
         });
 
         Ok(vec![out_handle, in_handle])
     }
 
-    pub async fn start(&mut self, command: P9cpuCommand) -> Result<()> {
+    pub async fn start(&mut self, command: P9cpuCommand) -> Result<(), P9cpuClientError> {
         if self.session_info.is_some() {
             return Err(P9cpuClientError::AlreadyStarted)?;
         }
@@ -401,7 +403,7 @@ where
 
             // let reader = ninep_out_stream.map_err(|e| e.into()).into_async_read();
 
-            let reader = StreamReader::new(ninep_out_stream.map_err(|e| e.into()));
+            let reader = StreamReader::new(ninep_out_stream);
             let writer = SenderWriter::new(ninep_tx);
             // tokio_util::io::StreamReader::new(ninep_out_stream);
             let root = Path::new("/");
@@ -501,7 +503,6 @@ where
             Err(P9cpuClientError::NonZeroExitCode(code))?
         }
     }
-
 
     pub async fn wait(&mut self) -> Result<()> {
         let SessionInfo {

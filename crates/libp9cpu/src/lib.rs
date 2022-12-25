@@ -13,14 +13,14 @@ pub enum Addr {
     Uds(String),
 }
 
-pub trait AsBytes<'a> {
-    fn as_bytes(&self) -> &[u8];
-}
+// pub trait AsBytes<'a> {
+//     fn as_bytes(&self) -> &[u8];
+// }
 
-pub trait FromVecu8 {
-    fn from_vec_u8(vec: Vec<u8>) -> Self;
-}
+// pub trait FromVecu8 {
+//     fn from_vec_u8(vec: Vec<u8>) -> Self;
+// }
 
-pub trait IntoByteVec {
-    fn into_byte_vec(self) -> Vec<u8>;
-}
+// pub trait IntoByteVec {
+//     fn into_byte_vec(self) -> Vec<u8>;
+// }

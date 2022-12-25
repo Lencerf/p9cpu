@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{fstab::FsTab, rpc, AsBytes, FromVecu8, P9cpuCommand};
+use crate::{fstab::FsTab, rpc, P9cpuCommand};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -18,12 +18,10 @@ use tokio::{
     fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::{
-        mpsc::{self, Receiver},
-        oneshot, RwLock,
-    },
+    sync::{mpsc, oneshot, RwLock},
     task::JoinHandle,
 };
+use tokio_stream::wrappers::ReceiverStream;
 
 #[async_trait]
 pub trait P9cpuServerT {
@@ -94,12 +92,12 @@ pub struct Session {
     stdout: Arc<RwLock<StdoutReader>>,
     stderr: Arc<RwLock<Option<ChildStderr>>>,
     child: Arc<RwLock<Child>>,
-    handles: Arc<RwLock<Vec<JoinHandle<()>>>>,
+    handles: Arc<RwLock<Vec<JoinHandle<Result<(), P9cpuServerError>>>>>,
 }
 
 #[derive(Debug)]
 pub struct PendingSession {
-    ninep: Arc<RwLock<Option<(u16, JoinHandle<()>)>>>,
+    ninep: Arc<RwLock<Option<(u16, JoinHandle<Result<(), P9cpuServerError>>)>>>,
 }
 
 #[derive(Error, Debug)]
@@ -108,8 +106,8 @@ pub enum P9cpuServerError {
     SpawnFail(std::io::Error),
     #[error("Session does not exist")]
     SessionNotExist,
-    #[error("Stdio: {0}")]
-    StdIo(std::io::Error),
+    #[error("IO Error: {0}")]
+    IoErr(std::io::Error),
     #[error("Duplicate session id")]
     DuplicateId,
     #[error("Command exited without return code.")]
@@ -130,6 +128,14 @@ pub enum P9cpuServerError {
     No9pPort,
     #[error("String contains null: {0:?}")]
     StringContainsNull(std::ffi::NulError),
+    #[error("Channel closed")]
+    ChannelClosed,
+}
+
+impl<T> From<mpsc::error::SendError<T>> for P9cpuServerError {
+    fn from(_: mpsc::error::SendError<T>) -> Self {
+        Self::ChannelClosed
+    }
 }
 
 fn parse_fstab_opt(opt: &str) -> (nix::mount::MsFlags, String) {
@@ -363,7 +369,7 @@ where
             cmd_stdin
                 .write_u8(item)
                 .await
-                .map_err(P9cpuServerError::StdIo)?;
+                .map_err(P9cpuServerError::IoErr)?;
         }
         Ok(())
     }
@@ -372,62 +378,124 @@ where
         &self,
         sid: &SID,
         mut in_stream: impl Stream<Item = Vec<u8>> + Unpin,
-    ) -> Result<(), P9cpuServerError>
-    {
+    ) -> Result<(), P9cpuServerError> {
         let cmd_stdin = self.get_session(sid, |s| s.stdin.clone()).await?;
         let mut cmd_stdin = cmd_stdin.write().await;
         while let Some(item) = in_stream.next().await {
             cmd_stdin
                 .write_all(&item)
                 .await
-                .map_err(P9cpuServerError::StdIo)?;
+                .map_err(P9cpuServerError::IoErr)?;
         }
         Ok(())
     }
 
-    pub async fn stdout<Item>(&self, sid: &SID) -> Result<Receiver<Item>, P9cpuServerError>
-    where
-        Item: FromVecu8 + Debug + Send + Sync + 'static,
-    {
+    // pub async fn stdout<Item>(&self, sid: &SID) -> Result<Receiver<Item>, P9cpuServerError>
+    // where
+    //     Item: FromVecu8 + Debug + Send + Sync + 'static,
+    // {
+    //     let cmd_stdout = self.get_session(sid, |s| s.stdout.clone()).await?;
+    //     let (tx, rx) = mpsc::channel(10);
+    //     let out_handle = tokio::spawn(async move {
+    //         let mut out = cmd_stdout.write().await;
+    //         if let Err(_e) = send_buf(&mut *out, tx).await {}
+    //     });
+    //     let handles = self.get_session(sid, |s| s.handles.clone()).await?;
+    //     handles.write().await.push(out_handle);
+    //     Ok(rx)
+    // }
+
+    pub async fn stdout_st(
+        &self,
+        sid: &SID,
+    ) -> Result<impl Stream<Item = Vec<u8>>, P9cpuServerError> {
         let cmd_stdout = self.get_session(sid, |s| s.stdout.clone()).await?;
         let (tx, rx) = mpsc::channel(10);
         let out_handle = tokio::spawn(async move {
             let mut out = cmd_stdout.write().await;
-            if let Err(_e) = send_buf(&mut *out, tx).await {}
+            Self::copy_to(&mut *out, tx).await
         });
         let handles = self.get_session(sid, |s| s.handles.clone()).await?;
         handles.write().await.push(out_handle);
-        Ok(rx)
+        let stream = ReceiverStream::new(rx);
+        Ok(stream)
     }
 
-    pub async fn stderr<Item>(&self, sid: &SID) -> Result<Receiver<Item>, P9cpuServerError>
-    where
-        Item: FromVecu8 + Debug + Send + Sync + 'static,
-    {
+    async fn copy_to(
+        src: &mut (impl AsyncRead + Unpin),
+        tx: mpsc::Sender<Vec<u8>>,
+    ) -> Result<(), P9cpuServerError> {
+        loop {
+            let mut buf = vec![0; 128];
+            let len = src.read(&mut buf).await.map_err(P9cpuServerError::IoErr)?;
+            if len == 0 {
+                break;
+            }
+            buf.truncate(len);
+            tx.send(buf).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn stderr_st(
+        &self,
+        sid: &SID,
+    ) -> Result<impl Stream<Item = Vec<u8>>, P9cpuServerError> {
         let cmd_stderr = self.get_session(sid, |s| s.stderr.clone()).await?;
         let (tx, rx) = mpsc::channel(10);
         let err_handle = tokio::spawn(async move {
             let mut err = cmd_stderr.write().await;
             let Some(ref mut err) = &mut *err else {
-                return;
+                return Ok(());
             };
-            if let Err(_e) = send_buf(&mut *err, tx).await {}
+            Self::copy_to(&mut *err, tx).await
         });
         let handles = self.get_session(sid, |s| s.handles.clone()).await?;
         handles.write().await.push(err_handle);
-        Ok(rx)
+        let stream = ReceiverStream::new(rx);
+        Ok(stream)
     }
 
-    pub async fn ninep_forward<'a, IS, IItem, OItem>(
+    // pub async fn stderr<Item>(&self, sid: &SID) -> Result<Receiver<Item>, P9cpuServerError>
+    // where
+    //     Item: FromVecu8 + Debug + Send + Sync + 'static,
+    // {
+    //     let cmd_stderr = self.get_session(sid, |s| s.stderr.clone()).await?;
+    //     let (tx, rx) = mpsc::channel(10);
+    //     let err_handle = tokio::spawn(async move {
+    //         let mut err = cmd_stderr.write().await;
+    //         let Some(ref mut err) = &mut *err else {
+    //             return;
+    //         };
+    //         if let Err(_e) = send_buf(&mut *err, tx).await {}
+    //     });
+    //     let handles = self.get_session(sid, |s| s.handles.clone()).await?;
+    //     handles.write().await.push(err_handle);
+    //     Ok(rx)
+    // }
+
+    // pub async fn ninep_f(
+    //     &self,
+    //     sid: &SID,
+    //     mut in_stream: impl Stream<Item = Vec<u8>> + Unpin,
+    // ) -> Result<impl Stream<Item = Vec<u8>>, P9cpuServerError> {
+
+    // }
+
+    // pub async fn ninep_forward<'a, IS, IItem, OItem>(
+    //     &self,
+    //     sid: &SID,
+    //     mut in_stream: IS,
+    // ) -> Result<Receiver<OItem>, P9cpuServerError>
+    // where
+    //     OItem: FromVecu8 + Debug + Send + Sync + 'static,
+    //     IS: Stream<Item = IItem> + Unpin + Send + 'static,
+    //     IItem: AsBytes<'a> + Send + Sync,
+    pub async fn ninep_forward(
         &self,
         sid: &SID,
-        mut in_stream: IS,
-    ) -> Result<Receiver<OItem>, P9cpuServerError>
-    where
-        OItem: FromVecu8 + Debug + Send + Sync + 'static,
-        IS: Stream<Item = IItem> + Unpin + Send + 'static,
-        IItem: AsBytes<'a> + Send + Sync,
-    {
+        mut in_stream: impl Stream<Item = Vec<u8>> + Unpin + Send + 'static,
+    ) -> Result<impl Stream<Item = Vec<u8>>, P9cpuServerError> {
         let pending = self.pending.write().await;
         let session = pending.get(sid).ok_or(P9cpuServerError::SessionNotExist)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -448,7 +516,7 @@ where
             println!("forwarding thread started");
             let Ok((mut stream, peer)) = listener.accept().await else {
                 println!("get stream fail");
-                return;
+                return Ok(());
             };
             println!("get ninep request from client {:?}", peer);
             let (mut reader, mut writer) = stream.split();
@@ -456,29 +524,20 @@ where
                 let mut buf = vec![0; 128];
                 tokio::select! {
                     len = reader.read(&mut buf) => {
-                        let Ok(len) = len else {
-                            println!("buf from reader is err");
-                            break
-                        };
+                        let len = len.map_err(P9cpuServerError::IoErr)?;
                         if len == 0 {
                             println!("buf from reader is 0");
                             break;
                         }
-                        let item = OItem::from_vec_u8(buf[0..len].to_vec());
-                        if tx.send(item).await.is_err() {
-                            println!("tx is gone");
-                            break;
-                        }
+                        buf.truncate(len);
+                        tx.send(buf).await?;
                     }
                     in_item = in_stream.next() => {
                         let Some(in_item) = in_item else {
                             println!("in item is none");
                             break
                         };
-                        let Ok(len) = writer.write(in_item.as_bytes()).await else {
-                            println!("send bytes to os client fail");
-                            break
-                        };
+                        let len = writer.write(&in_item).await.map_err(P9cpuServerError::IoErr)?;
                         if len == 0 {
                             println!("send bytes to os client is o");
                             break;
@@ -486,10 +545,11 @@ where
                     }
                 }
             }
+            Ok(())
         };
         let handle = tokio::spawn(f);
         *session.ninep.write().await = Some((port, handle));
-        Ok(rx)
+        Ok(ReceiverStream::new(rx))
     }
 
     pub async fn wait(&self, sid: &SID) -> Result<i32, P9cpuServerError> {
@@ -510,22 +570,22 @@ where
     }
 }
 
-async fn send_buf<R, Item>(src: &mut R, tx: mpsc::Sender<Item>) -> Result<()>
-where
-    R: AsyncRead + Unpin,
-    Item: Sync + Send + Debug + 'static + FromVecu8,
-{
-    loop {
-        let mut buf = vec![0; 128];
-        let len = src.read(&mut buf).await?;
-        if len == 0 {
-            break;
-        }
-        buf.truncate(len);
-        tx.send(Item::from_vec_u8(buf)).await?;
-    }
-    Ok(())
-}
+// async fn send_buf<R, Item>(src: &mut R, tx: mpsc::Sender<Item>) -> Result<()>
+// where
+//     R: AsyncRead + Unpin,
+//     Item: Sync + Send + Debug + 'static + FromVecu8,
+// {
+//     loop {
+//         let mut buf = vec![0; 128];
+//         let len = src.read(&mut buf).await?;
+//         if len == 0 {
+//             break;
+//         }
+//         buf.truncate(len);
+//         tx.send(Item::from_vec_u8(buf)).await?;
+//     }
+//     Ok(())
+// }
 
 pub fn rpc_based() -> rpc::rpc_server::RpcServer {
     rpc::rpc_server::RpcServer {}

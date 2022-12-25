@@ -1,5 +1,5 @@
-use anyhow::{Result};
-use flexi_logger::{Logger, DeferredNow, Record};
+use anyhow::Result;
+use flexi_logger::{DeferredNow, Logger, Record};
 use libp9cpu::server::P9cpuServerT;
 
 use clap::Parser;

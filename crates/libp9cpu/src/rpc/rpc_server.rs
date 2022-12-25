@@ -143,10 +143,7 @@ impl P9cpu for P9cpuService {
         };
         let sid = vec_to_uuid(&id)?;
         // let Some(cmd) = request.
-        self.inner
-            .start(cmd, sid)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.inner.start(cmd, sid).await?;
         Ok(Response::new(Empty {}))
     }
 
@@ -167,41 +164,27 @@ impl P9cpu for P9cpuService {
             stream: byte_stream,
             item: Some(data),
         };
-        self.inner
-            .stdin(&sid, stream)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.inner.stdin(&sid, stream).await?;
         Ok(Response::new(Empty {}))
     }
 
     async fn stdout(&self, request: Request<P9cpuSessionId>) -> RpcResult<Self::StdoutStream> {
         let sid = vec_to_uuid(&request.into_inner().id)?;
-        let rx = self
-            .inner
-            .stdout(&sid)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let out_stream = ReceiverStream::new(rx);
+        let stream = self.inner.stdout_st(&sid).await?;
+        let out_stream = stream.map(|data| Ok(P9cpuBytes { data }));
         Ok(Response::new(Box::pin(out_stream) as Self::StdoutStream))
     }
 
     async fn stderr(&self, request: Request<P9cpuSessionId>) -> RpcResult<Self::StderrStream> {
         let sid = vec_to_uuid(&request.into_inner().id)?;
-        let rx = self
-            .inner
-            .stderr(&sid)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let err_stream = ReceiverStream::new(rx);
+        let stream = self.inner.stderr_st(&sid).await?;
+        let err_stream = stream.map(|data| Ok(P9cpuBytes { data }));
         Ok(Response::new(Box::pin(err_stream) as Self::StderrStream))
     }
 
     async fn dial(&self, _: Request<Empty>) -> RpcResult<P9cpuSessionId> {
         let sid = uuid::Uuid::new_v4();
-        self.inner
-            .dial(sid)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.inner.dial(sid).await?;
         let r = P9cpuSessionId {
             id: sid.into_bytes().into(),
         };
@@ -217,24 +200,23 @@ impl P9cpu for P9cpuService {
             return Err(Status::invalid_argument("no session id."));
         };
         let sid = vec_to_uuid(&id)?;
-        let rx = self
-            .inner
-            .ninep_forward(&sid, in_stream)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let ninep_stream = ReceiverStream::new(rx);
+        let byte_stream = in_stream.scan((), move |_s, req| match req {
+            Ok(r) => futures::future::ready(Some(r.data)),
+            Err(e) => {
+                log::error!("Session {} stdin stream error: {:?}", sid, e);
+                futures::future::ready(None)
+            }
+        });
+        let out_stream = self.inner.ninep_forward(&sid, byte_stream).await?;
+        let result_stream = out_stream.map(|data| Ok(P9cpuBytes { data }));
         Ok(Response::new(
-            Box::pin(ninep_stream) as Self::NinepForwardStream
+            Box::pin(result_stream) as Self::NinepForwardStream
         ))
     }
 
     async fn wait(&self, request: Request<P9cpuSessionId>) -> RpcResult<P9cpuWaitResponse> {
         let sid = vec_to_uuid(&request.into_inner().id)?;
-        let code = self
-            .inner
-            .wait(&sid)
-            .map_err(|e| Status::internal(e.to_string()))
-            .await?;
+        let code = self.inner.wait(&sid).await?;
         Ok(Response::new(P9cpuWaitResponse { code }))
     }
 }

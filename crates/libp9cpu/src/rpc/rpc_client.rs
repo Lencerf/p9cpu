@@ -7,6 +7,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_vsock::VsockStream;
 
+use crate::client::P9cpuClientError;
 use crate::rpc;
 use crate::rpc::{Empty, P9cpuBytes, StartRequest};
 use crate::Addr;
@@ -49,6 +50,12 @@ pub enum RpcInnerError {
     InvalidUuid(uuid::Error),
     #[error("Task join error: {0}")]
     JoinError(tokio::task::JoinError),
+}
+
+impl From<RpcInnerError> for P9cpuClientError {
+    fn from(error: RpcInnerError) -> Self {
+        P9cpuClientError::Inner(Box::new(error))
+    }
 }
 
 impl From<tokio::task::JoinError> for RpcInnerError {
@@ -147,20 +154,25 @@ where
 
 pub struct ByteVecStream<I> {
     inner: I,
+    session: uuid::Uuid,
+    name: &'static str,
 }
 
 impl<Inner, B> Stream for ByteVecStream<Inner>
 where
     Inner: Stream<Item = Result<B, Status>> + Unpin,
-    B: Into<Vec<u8>>,
+    Vec<u8>: From<B>,
 {
-    type Item = Result<Vec<u8>, RpcInnerError>;
+    type Item = Vec<u8>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.poll_next_unpin(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Ok(b))) => Poll::Ready(Some(Ok(b.into()))),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
+            Poll::Ready(Some(Ok(b))) => Poll::Ready(Some(b.into())),
+            Poll::Ready(Some(Err(e))) => {
+                log::error!("Session {}: {}: {}", self.session, self.name, e);
+                Poll::Ready(None)
+            }
         }
     }
 }
@@ -225,7 +237,11 @@ impl crate::client::ClientInnerT2 for RpcInner {
             id: sid.into_bytes().into(),
         };
         let out_stream = self.rpc_client.stdout(request).await?.into_inner();
-        Ok(ByteVecStream { inner: out_stream })
+        Ok(ByteVecStream {
+            inner: out_stream,
+            name: "stdout",
+            session: sid,
+        })
     }
 
     async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error> {
@@ -233,7 +249,11 @@ impl crate::client::ClientInnerT2 for RpcInner {
             id: sid.into_bytes().into(),
         };
         let err_stream = self.rpc_client.stderr(request).await?.into_inner();
-        Ok(ByteVecStream { inner: err_stream })
+        Ok(ByteVecStream {
+            inner: err_stream,
+            name: "stderr",
+            session: sid,
+        })
     }
 
     async fn stdin(
@@ -262,19 +282,20 @@ impl crate::client::ClientInnerT2 for RpcInner {
         TryOrErrInto { future: handle }
     }
 
-    type NinepInStreamItem = crate::rpc::NinepForwardRequest;
+    // type NinepInStreamItem = crate::rpc::NinepForwardRequest;
     // type NinepOutStream = Streaming<crate::rpc::P9cpuBytes>;
     async fn ninep_forward(
         &mut self,
         sid: Self::SessionId,
-        in_stream: impl Stream<Item = Self::NinepInStreamItem> + Send + Sync + 'static + Unpin,
+        in_stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Result<Self::ByteVecStream, Self::Error> {
         let first_req = crate::rpc::NinepForwardRequest {
             id: Some(sid.into_bytes().into()),
             data: vec![],
         };
+        let req_stream = in_stream.map(|data| rpc::NinepForwardRequest { data, id: None });
         let stream = PrependedStream {
-            stream: in_stream,
+            stream: req_stream,
             item: Some(first_req),
         };
         let out_stream = self
@@ -283,7 +304,11 @@ impl crate::client::ClientInnerT2 for RpcInner {
             .await
             .unwrap()
             .into_inner();
-        Ok(ByteVecStream { inner: out_stream })
+        Ok(ByteVecStream {
+            inner: out_stream,
+            name: "9p out",
+            session: sid,
+        })
     }
 
     async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error> {
