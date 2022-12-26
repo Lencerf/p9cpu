@@ -11,7 +11,7 @@ use crate::client::P9cpuClientError;
 use crate::rpc;
 use crate::rpc::{Empty, StartRequest};
 use crate::Addr;
-use crate::cmd::Command;
+use crate::cmd::CommandReq;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Status, Streaming};
@@ -191,7 +191,7 @@ impl crate::client::ClientInnerT2 for RpcInner {
     async fn start(
         &mut self,
         sid: Self::SessionId,
-        command: Command,
+        command: CommandReq,
     ) -> Result<(), Self::Error> {
         let req = StartRequest {
             id: sid.into_bytes().into(),

@@ -44,20 +44,20 @@ impl TryFrom<&str> for FsTab {
     }
 }
 
-impl Command {
-    pub fn new(program: String) -> Command {
-        Command {
+impl CommandReq {
+    pub fn new(program: String) -> CommandReq {
+        CommandReq {
             program,
             ..Default::default()
         }
     }
 
-    pub fn args(&mut self, args: impl IntoIterator<Item = String>) -> &mut Command {
+    pub fn args(&mut self, args: impl IntoIterator<Item = String>) -> &mut CommandReq {
         self.args.extend(args);
         self
     }
 
-    pub fn env(&mut self, key: impl Into<Vec<u8>>, val: impl Into<Vec<u8>>) -> &mut Command {
+    pub fn env(&mut self, key: impl Into<Vec<u8>>, val: impl Into<Vec<u8>>) -> &mut CommandReq {
         self.envs.push(EnvVar {
             key: key.into(),
             val: val.into(),
@@ -65,7 +65,7 @@ impl Command {
         self
     }
 
-    pub fn fstab(&mut self, tab: FsTab) -> &mut Command {
+    pub fn fstab(&mut self, tab: FsTab) -> &mut CommandReq {
         self.fstab.push(tab);
         self
     }

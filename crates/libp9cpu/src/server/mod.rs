@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::cmd::Command as CommandReq;
+use crate::cmd::CommandReq as CommandReq;
 use crate::{cmd::FsTab, rpc};
 use anyhow::Result;
 use async_trait::async_trait;

@@ -15,7 +15,7 @@ message EnvVar {
     bytes val = 2;
 }
 
-message Command {
+message CommandReq {
     string program = 1;
     repeated string args = 2;
     repeated EnvVar envs = 3;

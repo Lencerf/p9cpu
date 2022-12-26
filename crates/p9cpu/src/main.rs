@@ -4,7 +4,7 @@ use std::{
 
 use anyhow::Result;
 use clap::Parser;
-use libp9cpu::cmd::{Command, EnvVar, FsTab};
+use libp9cpu::cmd::{CommandReq, EnvVar, FsTab};
 use libp9cpu::parse_namespace;
 use tokio::io::AsyncBufReadExt;
 
@@ -106,7 +106,7 @@ async fn app(args: Args) -> Result<()> {
         }
     }
     let program = args.args[0].clone();
-    let cmd = Command {
+    let cmd = CommandReq {
         program,
         args: Vec::from(&args.args[1..]),
         envs: env_vars,

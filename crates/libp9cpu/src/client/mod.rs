@@ -5,7 +5,7 @@ use std::vec;
 
 use crate::rpc;
 use crate::Addr;
-use crate::cmd::Command;
+use crate::cmd::CommandReq;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Future;
@@ -29,7 +29,7 @@ pub trait ClientInnerT2 {
     async fn start(
         &mut self,
         sid: Self::SessionId,
-        command: Command,
+        command: CommandReq,
     ) -> Result<(), Self::Error>;
 
     // type ByteStream: Stream<Item = Result<u8, Self::Error>> + Unpin + Send + 'static;
@@ -395,7 +395,7 @@ where
     //     Ok(vec![out_handle, in_handle])
     // }
 
-    pub async fn start(&mut self, command: Command) -> Result<(), P9cpuClientError> {
+    pub async fn start(&mut self, command: CommandReq) -> Result<(), P9cpuClientError> {
         if self.session_info.is_some() {
             return Err(P9cpuClientError::AlreadyStarted)?;
         }
