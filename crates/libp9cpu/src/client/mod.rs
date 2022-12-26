@@ -5,11 +5,11 @@ use std::vec;
 
 use crate::rpc;
 use crate::Addr;
-use crate::P9cpuCommand;
+use crate::cmd::Command;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Future;
-use futures::TryStreamExt;
+
 use futures::{Stream, StreamExt};
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -29,7 +29,7 @@ pub trait ClientInnerT2 {
     async fn start(
         &mut self,
         sid: Self::SessionId,
-        command: P9cpuCommand,
+        command: Command,
     ) -> Result<(), Self::Error>;
 
     // type ByteStream: Stream<Item = Result<u8, Self::Error>> + Unpin + Send + 'static;
@@ -69,7 +69,7 @@ pub trait ClientInnerT2 {
 //     async fn start(
 //         &mut self,
 //         sid: Self::SessionId,
-//         command: P9cpuCommand,
+//         command: Command,
 //     ) -> Result<(), Self::Error>;
 
 //     async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
@@ -320,7 +320,7 @@ where
                     break;
                 }
                 buf.truncate(len);
-                tx.send(buf.into()).await?;
+                tx.send(buf).await?;
             }
             drop(tx);
             stdin_future.await?;
@@ -338,7 +338,8 @@ where
     where
         D: AsyncWrite + Unpin + Send + 'static,
     {
-        let handle = tokio::spawn(async move {
+        
+        tokio::spawn(async move {
             while let Some(bytes) = src.next().await {
                 dst.write_all(&bytes).await?;
                 if flush {
@@ -346,8 +347,7 @@ where
                 }
             }
             Ok(())
-        });
-        handle
+        })
     }
 
     // async fn setup_tty(
@@ -395,13 +395,13 @@ where
     //     Ok(vec![out_handle, in_handle])
     // }
 
-    pub async fn start(&mut self, command: P9cpuCommand) -> Result<(), P9cpuClientError> {
+    pub async fn start(&mut self, command: Command) -> Result<(), P9cpuClientError> {
         if self.session_info.is_some() {
             return Err(P9cpuClientError::AlreadyStarted)?;
         }
         let tty = command.tty;
         let sid = self.inner.dial().await?;
-        if !command.namespace.is_empty() {
+        if command.ninep {
             let (ninep_tx, ninep_rx) = mpsc::channel(1);
             // ninep_tx.send(<Inner as ClientInnerT>::NinepInStreamItem::from(vec![])).await;
             let ninep_in_stream = ReceiverStream::from(ninep_rx);

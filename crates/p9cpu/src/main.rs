@@ -1,8 +1,11 @@
-use std::{collections::HashMap, os::unix::prelude::OsStringExt};
+use std::{
+    os::unix::prelude::OsStringExt,
+};
 
 use anyhow::Result;
 use clap::Parser;
-use libp9cpu::{fstab::FsTab, EnvVar, P9cpuCommand};
+use libp9cpu::cmd::{Command, EnvVar, FsTab};
+use libp9cpu::parse_namespace;
 use tokio::io::AsyncBufReadExt;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -37,37 +40,36 @@ struct Args {
     #[arg()]
     host: String,
 
-    #[arg()]
-    program: Option<String>,
-
     #[arg(last = true)]
     args: Vec<String>,
 }
 
-fn parse_namespace(namespace: &str) -> HashMap<String, String> {
-    let mut result = HashMap::new();
-    if namespace.is_empty() {
-        return result;
-    }
-    for part in namespace.split(':') {
-        let mut iter = part.split('=');
-        let Some(target) = iter.next() else {
-            println!("invalid namespace: {}", part);
-            continue;
-        };
-        let source = iter.next().unwrap_or("");
-        if iter.next().is_some() {
-            println!("invalid namespace: {}", part);
-            continue;
-        }
-        if result.contains_key(target) {
-            println!("duplicate target: {}", target);
-            continue;
-        }
-        result.insert(target.to_owned(), source.to_owned());
-    }
-    result
-}
+// fn parse_namespace(namespace: &str) -> HashMap<String, String> {
+//     let mut result = HashMap::new();
+//     if namespace.is_empty() {
+//         return result;
+//     }
+//     for part in namespace.split(':') {
+//         let mut iter = part.split('=');
+//         let Some(target) = iter.next() else {
+//             println!("invalid namespace: {}", part);
+//             continue;
+//         };
+//         let source = iter.next().unwrap_or("");
+//         if iter.next().is_some() {
+//             println!("invalid namespace: {}", part);
+//             continue;
+//         }
+//         if result.contains_key(target) {
+//             println!("duplicate target: {}", target);
+//             continue;
+//         }
+//         result.insert(target.to_owned(), source.to_owned());
+//     }
+//     result
+// }
+
+
 
 async fn app(args: Args) -> Result<()> {
     println!("args = {:?}", args);
@@ -87,8 +89,12 @@ async fn app(args: Args) -> Result<()> {
             val: v.into_vec(),
         })
         .collect();
-
-    let mut fs_tab_lines = vec![];
+    if args.tmp_mnt.is_empty() {
+        println!("tmpmnt cannot be emepty");
+        return Ok(());
+    }
+    let mut fs_tab_lines = parse_namespace(&args.namespace, &args.tmp_mnt);
+    let ninep = !fs_tab_lines.is_empty();
     if let Some(ref fs_tab) = args.fs_tab {
         let fs_tab_file = tokio::fs::File::open(fs_tab).await?;
         let mut lines = tokio::io::BufReader::new(fs_tab_file).lines();
@@ -99,18 +105,15 @@ async fn app(args: Args) -> Result<()> {
             fs_tab_lines.push(FsTab::try_from(line.as_str())?);
         }
     }
-    let cmd = P9cpuCommand {
-        program: args.program.unwrap(),
-        args: args.args,
-        env: env_vars,
-        namespace: parse_namespace(&args.namespace),
+    let program = args.args[0].clone();
+    let cmd = Command {
+        program,
+        args: Vec::from(&args.args[1..]),
+        envs: env_vars,
+        ninep,
         fstab: fs_tab_lines,
         tty: args.tty,
-        tmp_mnt: if !args.tmp_mnt.is_empty() {
-            Some(args.tmp_mnt)
-        } else {
-            None
-        },
+        tmp_mnt: args.tmp_mnt,
     };
     client.start(cmd).await?;
     client.wait().await?;

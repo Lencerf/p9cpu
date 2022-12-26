@@ -1,8 +1,7 @@
 use super::{MountParams, P9cpuServerError};
-use crate::fstab::FsTab;
+use crate::cmd::FsTab;
 use nix::mount::MsFlags;
 use std::{
-    collections::HashMap,
     ffi::{CStr, CString},
 };
 use tokio::process::Command;
@@ -86,15 +85,15 @@ pub fn create_private_root(cmd: &mut Command) {
 
 pub fn create_namespace_9p(
     cmd: &mut Command,
-    namespace: HashMap<String, String>,
+    // namespace: HashMap<String, String>,
     tmp_mnt: String,
     ninep_port: u16,
     user: &str,
 ) -> Result<(), P9cpuServerError> {
     let c_str_op = P9cpuServerError::StringContainsNull;
-    let ninep_mount = format!("{}/mnt9p", &tmp_mnt);
+    let ninep_mount = format!("{}/{}", &tmp_mnt, crate::NINEP_MOUNT);
     let tmp_mnt_c = CString::new(tmp_mnt).map_err(c_str_op)?;
-    let ninp_mount_c = CString::new(ninep_mount.clone()).map_err(c_str_op)?;
+    let ninp_mount_c = CString::new(ninep_mount).map_err(c_str_op)?;
     let mut mount_params = vec![];
     mount_params.push(MountParams {
         source: Some(CString::new("p9cpu").unwrap()),
@@ -115,19 +114,19 @@ pub fn create_namespace_9p(
         flags: MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
         data: Some(ninp_opt_c),
     });
-    for (target, mut source) in namespace.iter() {
-        if source.is_empty() {
-            source = target;
-        }
-        let local_source = format!("{}{}", &ninep_mount, source);
-        mount_params.push(MountParams {
-            source: Some(CString::new(local_source).unwrap()),
-            target: CString::new(target.to_owned()).unwrap(),
-            fstype: None,
-            flags: MsFlags::MS_BIND,
-            data: None,
-        });
-    }
+    // for (target, mut source) in namespace.iter() {
+    //     if source.is_empty() {
+    //         source = target;
+    //     }
+    //     let local_source = format!("{}{}", &ninep_mount, source);
+    //     mount_params.push(MountParams {
+    //         source: Some(CString::new(local_source).unwrap()),
+    //         target: CString::new(target.to_owned()).unwrap(),
+    //         fstype: None,
+    //         flags: MsFlags::MS_BIND,
+    //         data: None,
+    //     });
+    // }
 
     let op = move || {
         for param in &mount_params {

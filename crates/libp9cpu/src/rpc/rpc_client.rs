@@ -9,12 +9,12 @@ use tokio_vsock::VsockStream;
 
 use crate::client::P9cpuClientError;
 use crate::rpc;
-use crate::rpc::{Empty, P9cpuBytes, StartRequest};
+use crate::rpc::{Empty, StartRequest};
 use crate::Addr;
-use crate::P9cpuCommand;
+use crate::cmd::Command;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
-use tonic::{Response, Status, Streaming};
+use tonic::{Status, Streaming};
 use tower::service_fn;
 
 use super::PrependedStream;
@@ -191,7 +191,7 @@ impl crate::client::ClientInnerT2 for RpcInner {
     async fn start(
         &mut self,
         sid: Self::SessionId,
-        command: P9cpuCommand,
+        command: Command,
     ) -> Result<(), Self::Error> {
         let req = StartRequest {
             id: sid.into_bytes().into(),
@@ -334,7 +334,7 @@ impl crate::client::ClientInnerT2 for RpcInner {
 //     async fn start(
 //         &mut self,
 //         sid: Self::SessionId,
-//         command: P9cpuCommand,
+//         command: Command,
 //     ) -> Result<(), Self::Error> {
 //         let req = StartRequest {
 //             id: sid.into_bytes().into(),

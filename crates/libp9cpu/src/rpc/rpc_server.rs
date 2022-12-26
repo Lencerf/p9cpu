@@ -3,7 +3,7 @@ use super::{
     Empty, NinepForwardRequest, P9cpuBytes, P9cpuSessionId, P9cpuStdinRequest, P9cpuWaitResponse,
     PrependedStream, StartRequest,
 };
-use crate::rpc;
+
 use crate::rpc::p9cpu_server;
 use crate::server::{P9cpuServerError, P9cpuServerInner};
 use crate::Addr;
@@ -16,7 +16,7 @@ use std::task::Poll;
 use tokio_vsock::{VsockListener, VsockStream};
 use tonic::transport::Server;
 
-use tokio_stream::wrappers::ReceiverStream;
+
 // use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 

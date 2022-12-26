@@ -1,5 +1,8 @@
-pub type FsTab = crate::rpc::FsTab;
+
+
 use thiserror::Error;
+
+tonic::include_proto!("cmd");
 
 #[derive(Error, Debug)]
 pub enum FsTabError {
@@ -38,5 +41,32 @@ impl TryFrom<&str> for FsTab {
             freq,
             passno,
         })
+    }
+}
+
+impl Command {
+    pub fn new(program: String) -> Command {
+        Command {
+            program,
+            ..Default::default()
+        }
+    }
+
+    pub fn args(&mut self, args: impl IntoIterator<Item = String>) -> &mut Command {
+        self.args.extend(args);
+        self
+    }
+
+    pub fn env(&mut self, key: impl Into<Vec<u8>>, val: impl Into<Vec<u8>>) -> &mut Command {
+        self.envs.push(EnvVar {
+            key: key.into(),
+            val: val.into(),
+        });
+        self
+    }
+
+    pub fn fstab(&mut self, tab: FsTab) -> &mut Command {
+        self.fstab.push(tab);
+        self
     }
 }

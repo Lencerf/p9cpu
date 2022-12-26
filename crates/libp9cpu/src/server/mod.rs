@@ -3,13 +3,14 @@ use std::{
     ffi::{CString, OsStr},
     fmt::{Debug, Display},
     hash::Hash,
-    os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt},
+    os::unix::prelude::{FromRawFd, OsStrExt},
     pin::Pin,
     process::Stdio,
     sync::Arc,
 };
 
-use crate::{fstab::FsTab, rpc, P9cpuCommand};
+use crate::cmd::Command as CommandReq;
+use crate::{cmd::FsTab, rpc};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -18,7 +19,7 @@ use tokio::{
     fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::{mpsc, oneshot, RwLock},
+    sync::{mpsc, RwLock},
     task::JoinHandle,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -209,14 +210,14 @@ where
 
     fn make_cmd(
         &self,
-        command: P9cpuCommand,
+        command: CommandReq,
         ninep_port: Option<u16>,
     ) -> Result<(Command, Option<File>), P9cpuServerError> {
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
         let mut user = "nouser".to_string();
         let mut pwd = None;
-        for env in command.env {
+        for env in command.envs {
             cmd.env(OsStr::from_bytes(&env.key), OsStr::from_bytes(&env.val));
             match env.key.as_slice() {
                 b"USER" => {
@@ -240,20 +241,26 @@ where
             });
         }
         pre_exec::create_private_root(&mut cmd);
-        if let Some(tmp_mnt) = command.tmp_mnt {
-            if !command.namespace.is_empty() {
-                let Some(ninep_port) = ninep_port else {
+        if command.ninep {
+            let Some(ninep_port) = ninep_port else {
                     return Err(P9cpuServerError::No9pPort);
-                };
-                pre_exec::create_namespace_9p(
-                    &mut cmd,
-                    command.namespace,
-                    tmp_mnt,
-                    ninep_port,
-                    &user,
-                )?;
-            }
+            };
+            pre_exec::create_namespace_9p(&mut cmd, command.tmp_mnt, ninep_port, &user)?;
         }
+        // if let Some(tmp_mnt) = command.tmp_mnt {
+        //     if !command.namespace.is_empty() {
+        //         let Some(ninep_port) = ninep_port else {
+        //             return Err(P9cpuServerError::No9pPort);
+        //         };
+        //         pre_exec::create_namespace_9p(
+        //             &mut cmd,
+        //             command.namespace,
+        //             tmp_mnt,
+        //             ninep_port,
+        //             &user,
+        //         )?;
+        //     }
+        // }
         pre_exec::mount_fstab(&mut cmd, command.fstab)?;
         if let Some(pwd) = pwd {
             unsafe {
@@ -300,7 +307,7 @@ where
         Ok(())
     }
 
-    pub async fn start(&self, command: P9cpuCommand, sid: SID) -> Result<(), P9cpuServerError> {
+    pub async fn start(&self, command: CommandReq, sid: SID) -> Result<(), P9cpuServerError> {
         let Some(PendingSession { ninep }) = self.pending.write().await.remove(&sid) else {
             return Err(P9cpuServerError::SessionNotExist);
         };
@@ -422,7 +429,6 @@ where
                 break;
             }
             buf.truncate(len);
-            log::info!("buf={}", String::from_utf8_lossy(&buf));
             tx.send(buf).await?;
         }
         Ok(())

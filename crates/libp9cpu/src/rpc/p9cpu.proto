@@ -1,33 +1,11 @@
 syntax = "proto3";
 package p9cpu;
 
-message FsTab {
-    string spec = 1;
-    string file = 2;
-    string vfstype = 3;
-    string mntops = 4;
-    int32 freq = 5;
-    int32 passno = 6;
-}
+import "cmd.proto";
 
 message StartRequest {
     bytes id = 1;
-    P9cpuCommand cmd = 2;
-}
-
-message EnvVar {
-    bytes key = 1;
-    bytes val = 2;
-}
-
-message P9cpuCommand {
-    string program = 1;
-    repeated string args = 2;
-    repeated EnvVar env = 3;
-    repeated FsTab fstab = 4;
-    map<string, string> namespace = 5;
-    bool tty = 6;
-    optional string tmp_mnt = 7;
+    cmd.Command cmd = 2;
 }
 
 message P9cpuStdinRequest {
