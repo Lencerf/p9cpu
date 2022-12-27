@@ -9,15 +9,13 @@ use crate::server::{P9cpuServerError, P9cpuServerInner};
 use crate::Addr;
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, TryFutureExt};
+use futures::{Stream, StreamExt};
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::task::Poll;
 use tokio_vsock::{VsockListener, VsockStream};
 use tonic::transport::Server;
 
-
-// use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
 type RpcResult<T> = Result<Response<T>, Status>;

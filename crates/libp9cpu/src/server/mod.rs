@@ -4,9 +4,8 @@ use std::{
     fmt::{Debug, Display},
     hash::Hash,
     io::ErrorKind,
-    os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, OsStrExt, OwnedFd},
+    os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt, OwnedFd},
     pin::Pin,
-    process::Stdio,
     sync::Arc,
 };
 
@@ -17,9 +16,7 @@ use async_trait::async_trait;
 use futures::{ready, Stream, StreamExt};
 use thiserror::Error;
 use tokio::{
-    fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::unix::OwnedReadHalf,
     process::{Child, Command},
     sync::{mpsc, RwLock},
     task::JoinHandle,

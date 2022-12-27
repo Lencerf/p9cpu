@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use futures::{Future, FutureExt, Stream, StreamExt};
+use futures::{Future, Stream, StreamExt};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_vsock::VsockStream;
@@ -178,7 +178,7 @@ where
 }
 
 #[async_trait]
-impl crate::client::ClientInnerT2 for RpcInner {
+impl crate::client::ClientInnerT for RpcInner {
     type Error = RpcInnerError;
     type SessionId = uuid::Uuid;
 

@@ -2,7 +2,7 @@ use std::os::unix::prelude::OsStringExt;
 
 use anyhow::Result;
 use clap::Parser;
-use libp9cpu::cmd::{Command, CommandReq, EnvVar, FsTab};
+use libp9cpu::cmd::{Command, FsTab};
 use libp9cpu::parse_namespace;
 use tokio::io::AsyncBufReadExt;
 
