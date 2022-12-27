@@ -3,22 +3,24 @@ use std::{
     ffi::{CString, OsStr},
     fmt::{Debug, Display},
     hash::Hash,
-    os::unix::prelude::{FromRawFd, OsStrExt},
+    io::ErrorKind,
+    os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, OsStrExt, OwnedFd},
     pin::Pin,
     process::Stdio,
     sync::Arc,
 };
 
-use crate::cmd::CommandReq as CommandReq;
+use crate::cmd::CommandReq;
 use crate::{cmd::FsTab, rpc};
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::{ready, Stream, StreamExt};
 use thiserror::Error;
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    net::unix::OwnedReadHalf,
+    process::{Child, Command},
     sync::{mpsc, RwLock},
     task::JoinHandle,
 };
@@ -29,69 +31,168 @@ pub trait P9cpuServerT {
     async fn serve(&self, addr: crate::Addr) -> Result<()>;
 }
 
-#[derive(Debug)]
-enum StdinWriter {
-    Piped(ChildStdin),
-    Pty(tokio::fs::File),
+enum ChildStdio {
+    Piped(OwnedFd, OwnedFd, OwnedFd),
+    Pty(OwnedFd),
 }
 
-impl AsyncWrite for StdinWriter {
+// #[derive(Debug)]
+// enum StdinWriter {
+//     Piped(ChildStdin),
+//     Pty(tokio::fs::File),
+// }
+
+// impl AsyncWrite for StdinWriter {
+//     fn poll_write(
+//         mut self: Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//         buf: &[u8],
+//     ) -> std::task::Poll<Result<usize, std::io::Error>> {
+//         match &mut *self {
+//             StdinWriter::Piped(inner) => Pin::new(inner).poll_write(cx, buf),
+//             StdinWriter::Pty(inner) => Pin::new(inner).poll_write(cx, buf),
+//         }
+//     }
+
+//     fn poll_flush(
+//         mut self: Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//     ) -> std::task::Poll<Result<(), std::io::Error>> {
+//         match &mut *self {
+//             StdinWriter::Piped(inner) => Pin::new(inner).poll_flush(cx),
+//             StdinWriter::Pty(inner) => Pin::new(inner).poll_flush(cx),
+//         }
+//     }
+
+//     fn poll_shutdown(
+//         mut self: Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//     ) -> std::task::Poll<Result<(), std::io::Error>> {
+//         match &mut *self {
+//             StdinWriter::Piped(inner) => Pin::new(inner).poll_shutdown(cx),
+//             StdinWriter::Pty(inner) => Pin::new(inner).poll_shutdown(cx),
+//         }
+//     }
+// }
+
+// #[derive(Debug)]
+// enum StdoutReader {
+//     Piped(ChildStdout),
+//     Pty(tokio::fs::File),
+// }
+
+// impl AsyncRead for StdoutReader {
+//     fn poll_read(
+//         mut self: Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//         buf: &mut tokio::io::ReadBuf<'_>,
+//     ) -> std::task::Poll<std::io::Result<()>> {
+//         match &mut *self {
+//             StdoutReader::Piped(inner) => Pin::new(inner).poll_read(cx, buf),
+//             StdoutReader::Pty(inner) => Pin::new(inner).poll_read(cx, buf),
+//         }
+//     }
+// }
+#[derive(Debug)]
+pub struct StdioFd {
+    fd: tokio::io::unix::AsyncFd<OwnedFd>,
+}
+
+impl TryFrom<OwnedFd> for StdioFd {
+    type Error = std::io::Error;
+
+    fn try_from(value: OwnedFd) -> Result<Self, Self::Error> {
+        let flags = unsafe { libc::fcntl(value.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let ret =
+            unsafe { libc::fcntl(value.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = tokio::io::unix::AsyncFd::new(value)?;
+        Ok(Self { fd })
+    }
+}
+
+impl AsyncRead for StdioFd {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        loop {
+            let mut guard = ready!(self.fd.poll_read_ready(cx))?;
+            let ret = unsafe {
+                libc::read(
+                    self.fd.as_raw_fd(),
+                    buf.unfilled_mut() as *mut _ as _,
+                    buf.remaining(),
+                )
+            };
+            if ret < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == ErrorKind::WouldBlock {
+                    guard.clear_ready();
+                    continue;
+                } else {
+                    return std::task::Poll::Ready(Err(e));
+                }
+            } else {
+                let n = ret as usize;
+                unsafe { buf.assume_init(n) };
+                buf.advance(n);
+                return std::task::Poll::Ready(Ok(()));
+            }
+        }
+    }
+}
+
+impl AsyncWrite for StdioFd {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
-        match &mut *self {
-            StdinWriter::Piped(inner) => Pin::new(inner).poll_write(cx, buf),
-            StdinWriter::Pty(inner) => Pin::new(inner).poll_write(cx, buf),
+        loop {
+            let mut guard = ready!(self.fd.poll_write_ready(cx))?;
+            let ret = unsafe { libc::write(self.fd.as_raw_fd(), buf as *const _ as _, buf.len()) };
+            if ret < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == ErrorKind::WouldBlock {
+                    guard.clear_ready();
+                    continue;
+                } else {
+                    return std::task::Poll::Ready(Err(e));
+                }
+            } else {
+                return std::task::Poll::Ready(Ok(ret as usize));
+            }
         }
     }
 
     fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
-        match &mut *self {
-            StdinWriter::Piped(inner) => Pin::new(inner).poll_flush(cx),
-            StdinWriter::Pty(inner) => Pin::new(inner).poll_flush(cx),
-        }
+        std::task::Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
-        match &mut *self {
-            StdinWriter::Piped(inner) => Pin::new(inner).poll_shutdown(cx),
-            StdinWriter::Pty(inner) => Pin::new(inner).poll_shutdown(cx),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum StdoutReader {
-    Piped(ChildStdout),
-    Pty(tokio::fs::File),
-}
-
-impl AsyncRead for StdoutReader {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match &mut *self {
-            StdoutReader::Piped(inner) => Pin::new(inner).poll_read(cx, buf),
-            StdoutReader::Pty(inner) => Pin::new(inner).poll_read(cx, buf),
-        }
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
 #[derive(Debug)]
 pub struct Session {
-    stdin: Arc<RwLock<StdinWriter>>,
-    stdout: Arc<RwLock<StdoutReader>>,
-    stderr: Arc<RwLock<Option<ChildStderr>>>,
+    stdin: Arc<RwLock<StdioFd>>,
+    stdout: Arc<RwLock<StdioFd>>,
+    stderr: Arc<RwLock<Option<StdioFd>>>,
     child: Arc<RwLock<Child>>,
     handles: Arc<RwLock<Vec<JoinHandle<Result<(), P9cpuServerError>>>>>,
 }
@@ -136,6 +237,12 @@ pub enum P9cpuServerError {
 impl<T> From<mpsc::error::SendError<T>> for P9cpuServerError {
     fn from(_: mpsc::error::SendError<T>) -> Self {
         Self::ChannelClosed
+    }
+}
+
+impl From<nix::Error> for P9cpuServerError {
+    fn from(e: nix::Error) -> Self {
+        Self::IoErr(std::io::Error::from_raw_os_error(e as i32))
     }
 }
 
@@ -212,7 +319,7 @@ where
         &self,
         command: CommandReq,
         ninep_port: Option<u16>,
-    ) -> Result<(Command, Option<File>), P9cpuServerError> {
+    ) -> Result<(Command, ChildStdio), P9cpuServerError> {
         let mut cmd = Command::new(command.program);
         cmd.args(command.args);
         let mut user = "nouser".to_string();
@@ -270,9 +377,9 @@ where
                 });
             }
         }
-        let pty_master = if command.tty {
+        let child_stdio = if command.tty {
             let result = nix::pty::openpty(None, None).map_err(P9cpuServerError::OpenPtyFail)?;
-            let stdin = unsafe { std::fs::File::from_raw_fd(result.slave) };
+            let stdin = unsafe { OwnedFd::from_raw_fd(result.slave) };
             let stdout = stdin.try_clone().map_err(P9cpuServerError::FdCloneFail)?;
             let stderr = stdin.try_clone().map_err(P9cpuServerError::FdCloneFail)?;
             cmd.stdin(stdin).stdout(stdout).stderr(stderr);
@@ -284,14 +391,27 @@ where
                     Ok(())
                 });
             }
-            Some(unsafe { tokio::fs::File::from_raw_fd(result.master) })
+            ChildStdio::Pty(unsafe { OwnedFd::from_raw_fd(result.master) })
         } else {
-            cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            None
+            let (stdin_rd, stdin_wr) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
+            let (stdout_rd, stdout_wr) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
+            let (stderr_rd, stderr_wr) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
+            let stdin = unsafe { OwnedFd::from_raw_fd(stdin_rd) };
+            let stdout = unsafe { OwnedFd::from_raw_fd(stdout_wr) };
+            let stderr = unsafe { OwnedFd::from_raw_fd(stderr_wr) };
+            // use std::io::prelude::*;
+            // let (mut reader, mut writer) = os_pipe::pipe().unwrap();
+
+            cmd.stdin(stdin).stdout(stdout).stderr(stderr);
+            unsafe {
+                ChildStdio::Piped(
+                    OwnedFd::from_raw_fd(stdin_wr),
+                    OwnedFd::from_raw_fd(stdout_rd),
+                    OwnedFd::from_raw_fd(stderr_rd),
+                )
+            }
         };
-        Ok((cmd, pty_master))
+        Ok((cmd, child_stdio))
     }
 
     pub async fn dial(&self, sid: SID) -> Result<(), P9cpuServerError> {
@@ -321,8 +441,9 @@ where
             ninep_port = Some(port);
             handles.push(handle);
         }
-        let (mut cmd, pty_master) = self.make_cmd(command, ninep_port)?;
+        let (mut cmd, child_stdio) = self.make_cmd(command, ninep_port)?;
         println!("make command is done, will spawn");
+
         // let mut child = if ninep_port.is_some() {
         //     let (tx, rx) = oneshot::channel();
         //     let f = async move {
@@ -340,22 +461,26 @@ where
         // } else {
         //     cmd.spawn().map_err(P9cpuServerError::SpawnFail)
         // }?;
-        let mut child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
-        println!("spawn command is done");
-        let (stdin, stdout, stderr) = if let Some(master) = pty_master {
-            let c = master.try_clone().await.unwrap();
-            (StdinWriter::Pty(master), StdoutReader::Pty(c), None)
-        } else {
-            log::info!("tty is not used");
-            let stdin = child.stdin.take().unwrap();
-            let stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take();
-            (
-                StdinWriter::Piped(stdin),
-                StdoutReader::Piped(stdout),
-                stderr,
-            )
+        let (stdin, stdout, stderr) = match child_stdio {
+            ChildStdio::Pty(master) => {
+                let master_copy = master.try_clone().map_err(P9cpuServerError::FdCloneFail)?;
+                (
+                    StdioFd::try_from(master).map_err(P9cpuServerError::IoErr)?,
+                    StdioFd::try_from(master_copy).map_err(P9cpuServerError::IoErr)?,
+                    None,
+                )
+            }
+            ChildStdio::Piped(stdin_wr, stdout_rd, stderr_rd) => {
+                log::info!("tty is not used");
+                (
+                    StdioFd::try_from(stdin_wr).map_err(P9cpuServerError::IoErr)?,
+                    StdioFd::try_from(stdout_rd).map_err(P9cpuServerError::IoErr)?,
+                    Some(StdioFd::try_from(stderr_rd).map_err(P9cpuServerError::IoErr)?),
+                )
+            }
         };
+        println!("spawn command is done");
+        let child = cmd.spawn().map_err(P9cpuServerError::SpawnFail)?;
         let info = Session {
             stdin: Arc::new(RwLock::new(stdin)),
             stdout: Arc::new(RwLock::new(stdout)),
@@ -646,3 +771,17 @@ where
 pub fn rpc_based() -> rpc::rpc_server::RpcServer {
     rpc::rpc_server::RpcServer {}
 }
+
+// #[cfg(test)]
+// mod test {
+//     #[test]
+//     fn test_non_blocking() {
+//         let r = nix::pty::openpty(None, None).unwrap();
+//         let flag = nix::fcntl::fcntl(r.master, nix::fcntl::FcntlArg::F_GETFL).unwrap();
+//         let flag = unsafe { nix::fcntl::OFlag::from_bits_unchecked(flag) };
+//         println!("flag = {:?}", flag);
+
+//         let arg = nix::fcntl::FcntlArg::F_SETFL(flag & nix::fcntl::OFlag::O_NONBLOCK);
+//         nix::fcntl::fcntl(r.master, arg).unwrap();
+//     }
+// }
