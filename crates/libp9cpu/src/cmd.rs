@@ -1,5 +1,3 @@
-
-
 use thiserror::Error;
 
 tonic::include_proto!("cmd");
@@ -44,29 +42,55 @@ impl TryFrom<&str> for FsTab {
     }
 }
 
-impl CommandReq {
-    pub fn new(program: String) -> CommandReq {
-        CommandReq {
-            program,
-            ..Default::default()
+pub struct Command {
+    pub(crate) req: CommandReq,
+}
+
+impl Command {
+    pub fn new(program: String) -> Self {
+        Self {
+            req: CommandReq {
+                program,
+                ..Default::default()
+            },
         }
     }
 
-    pub fn args(&mut self, args: impl IntoIterator<Item = String>) -> &mut CommandReq {
-        self.args.extend(args);
+    pub fn args(&mut self, args: impl IntoIterator<Item = String>) -> &mut Self {
+        self.req.args.extend(args);
         self
     }
 
-    pub fn env(&mut self, key: impl Into<Vec<u8>>, val: impl Into<Vec<u8>>) -> &mut CommandReq {
-        self.envs.push(EnvVar {
-            key: key.into(),
-            val: val.into(),
-        });
+    pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<Vec<u8>>,
+        V: Into<Vec<u8>>,
+    {
+        self.req.envs.extend(vars.into_iter().map(|(k, v)| EnvVar {
+            key: k.into(),
+            val: v.into(),
+        }));
         self
     }
 
-    pub fn fstab(&mut self, tab: FsTab) -> &mut CommandReq {
-        self.fstab.push(tab);
+    pub fn fstab(&mut self, tab: impl IntoIterator<Item = FsTab>) -> &mut Self {
+        self.req.fstab.extend(tab);
+        self
+    }
+
+    pub fn ninep(&mut self, enable: bool) -> &mut Self {
+        self.req.ninep = enable;
+        self
+    }
+
+    pub fn tty(&mut self, enable: bool) -> &mut Self {
+        self.req.tty = enable;
+        self
+    }
+
+    pub fn tmp_mnt(&mut self, tmp_mnt: String) -> &mut Self {
+        self.req.tmp_mnt = tmp_mnt;
         self
     }
 }

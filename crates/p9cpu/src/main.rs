@@ -1,10 +1,8 @@
-use std::{
-    os::unix::prelude::OsStringExt,
-};
+use std::os::unix::prelude::OsStringExt;
 
 use anyhow::Result;
 use clap::Parser;
-use libp9cpu::cmd::{CommandReq, EnvVar, FsTab};
+use libp9cpu::cmd::{Command, CommandReq, EnvVar, FsTab};
 use libp9cpu::parse_namespace;
 use tokio::io::AsyncBufReadExt;
 
@@ -69,8 +67,6 @@ struct Args {
 //     result
 // }
 
-
-
 async fn app(args: Args) -> Result<()> {
     println!("args = {:?}", args);
     let addr = match args.net {
@@ -83,12 +79,6 @@ async fn app(args: Args) -> Result<()> {
     };
     let mut client = libp9cpu::client::rpc_based(addr).await?;
 
-    let env_vars: Vec<_> = std::env::vars_os()
-        .map(|(k, v)| EnvVar {
-            key: k.into_vec(),
-            val: v.into_vec(),
-        })
-        .collect();
     if args.tmp_mnt.is_empty() {
         println!("tmpmnt cannot be emepty");
         return Ok(());
@@ -106,15 +96,14 @@ async fn app(args: Args) -> Result<()> {
         }
     }
     let program = args.args[0].clone();
-    let cmd = CommandReq {
-        program,
-        args: Vec::from(&args.args[1..]),
-        envs: env_vars,
-        ninep,
-        fstab: fs_tab_lines,
-        tty: args.tty,
-        tmp_mnt: args.tmp_mnt,
-    };
+    let mut cmd = Command::new(program);
+    cmd.args(Vec::from(&args.args[1..]));
+    cmd.envs(std::env::vars_os().map(|(k, v)| (k.into_vec(), v.into_vec())));
+    cmd.ninep(ninep);
+    cmd.fstab(fs_tab_lines);
+    cmd.tty(args.tty);
+    cmd.tmp_mnt(args.tmp_mnt);
+
     client.start(cmd).await?;
     client.wait().await?;
     Ok(())

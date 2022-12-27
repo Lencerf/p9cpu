@@ -5,7 +5,7 @@ use std::vec;
 
 use crate::rpc;
 use crate::Addr;
-use crate::cmd::CommandReq;
+use crate::cmd::{Command, CommandReq};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Future;
@@ -395,13 +395,13 @@ where
     //     Ok(vec![out_handle, in_handle])
     // }
 
-    pub async fn start(&mut self, command: CommandReq) -> Result<(), P9cpuClientError> {
+    pub async fn start(&mut self, command: Command) -> Result<(), P9cpuClientError> {
         if self.session_info.is_some() {
             return Err(P9cpuClientError::AlreadyStarted)?;
         }
-        let tty = command.tty;
+        let tty = command.req.tty;
         let sid = self.inner.dial().await?;
-        if command.ninep {
+        if command.req.ninep {
             let (ninep_tx, ninep_rx) = mpsc::channel(1);
             // ninep_tx.send(<Inner as ClientInnerT>::NinepInStreamItem::from(vec![])).await;
             let ninep_in_stream = ReceiverStream::from(ninep_rx);
@@ -425,7 +425,7 @@ where
                 }
             });
         }
-        self.inner.start(sid.clone(), command).await?;
+        self.inner.start(sid.clone(), command.req).await?;
         println!("will set up stdio");
         let (stop_tx, stop_rx) = broadcast::channel(1);
         // let handles = if tty {
