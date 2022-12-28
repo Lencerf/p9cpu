@@ -202,31 +202,31 @@ pub struct PendingSession {
 #[derive(Error, Debug)]
 pub enum P9cpuServerError {
     #[error("Failed to spawn: {0}")]
-    SpawnFail(std::io::Error),
+    SpawnFail(#[source] std::io::Error),
     #[error("Session does not exist")]
     SessionNotExist,
     #[error("IO Error: {0}")]
-    IoErr(std::io::Error),
+    IoErr(#[source] std::io::Error),
     #[error("Duplicate session id")]
     DuplicateId,
     #[error("Command exited without return code.")]
     NoReturnCode,
     #[error("Command error: {0}")]
-    CommandError(std::io::Error),
+    CommandError(#[source] std::io::Error),
     #[error("Cannot open pty device")]
-    OpenPtyFail(nix::Error),
+    OpenPtyFail(#[from] nix::Error),
     #[error("Cannot clone file descriptor: {0}")]
-    FdCloneFail(std::io::Error),
+    FdCloneFail(#[source] std::io::Error),
     #[error("Cannot create directory: {0}")]
-    MkDir(std::io::Error),
+    MkDir(#[source] std::io::Error),
     #[error("Invalid FsTab: {0}")]
     InvalidFsTab(String),
     #[error("Cannot bind listener: {0}")]
-    BindFail(std::io::Error),
+    BindFail(#[source] std::io::Error),
     #[error("9p forward not setup")]
     No9pPort,
     #[error("String contains null: {0:?}")]
-    StringContainsNull(std::ffi::NulError),
+    StringContainsNull(#[from] std::ffi::NulError),
     #[error("Channel closed")]
     ChannelClosed,
 }
@@ -234,12 +234,6 @@ pub enum P9cpuServerError {
 impl<T> From<mpsc::error::SendError<T>> for P9cpuServerError {
     fn from(_: mpsc::error::SendError<T>) -> Self {
         Self::ChannelClosed
-    }
-}
-
-impl From<nix::Error> for P9cpuServerError {
-    fn from(e: nix::Error) -> Self {
-        Self::IoErr(std::io::Error::from_raw_os_error(e as i32))
     }
 }
 
@@ -279,13 +273,12 @@ impl TryFrom<FsTab> for MountParams {
             passno: _,
         } = tab;
         let (flags, data) = parse_fstab_opt(&opt);
-        let op = P9cpuServerError::StringContainsNull;
         let mnt = MountParams {
-            source: Some(CString::new(source).map_err(op)?),
-            target: CString::new(target).map_err(op)?,
-            fstype: Some(CString::new(fstype).map_err(op)?),
+            source: Some(CString::new(source)?),
+            target: CString::new(target)?,
+            fstype: Some(CString::new(fstype)?),
             flags,
-            data: Some(CString::new(data).map_err(op)?),
+            data: Some(CString::new(data)?),
         };
         Ok(mnt)
     }

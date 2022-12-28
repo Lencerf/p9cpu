@@ -7,7 +7,7 @@ pub enum FsTabError {
     #[error("line does not contain 6 fields.")]
     NotSixFields,
     #[error("Invalid Number for {0}: {1}")]
-    InvalidNumber(&'static str, std::num::ParseIntError),
+    InvalidNumber(&'static str, #[source] std::num::ParseIntError),
 }
 
 impl TryFrom<&str> for FsTab {

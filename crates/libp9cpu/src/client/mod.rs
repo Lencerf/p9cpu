@@ -213,11 +213,11 @@ pub enum P9cpuClientError {
     NonZeroExitCode(i32),
     #[error("Command already started")]
     AlreadyStarted,
-    #[error("IO Error {0}")]
+    #[error("IO Error: {0}")]
     IoErr(#[from] std::io::Error),
-    #[error("Inner {0}")]
-    Inner(Box<dyn std::error::Error + Sync + Send + 'static>),
-    #[error("Channel closed.")]
+    #[error("Inner: {0}")]
+    Inner(#[source] anyhow::Error),
+    #[error("Channel closed")]
     ChannelClosed,
 }
 
@@ -235,7 +235,6 @@ pub struct P9cpuClient<Inner: ClientInnerT> {
 impl<'a, Inner> P9cpuClient<Inner>
 where
     Inner: ClientInnerT,
-    std::io::Error: From<<Inner as ClientInnerT>::Error>,
     P9cpuClientError: From<Inner::Error>,
 {
     pub async fn new(inner: Inner) -> Result<P9cpuClient<Inner>> {

@@ -61,18 +61,6 @@ impl crate::server::P9cpuServerT for RpcServer {
                 router.serve_with_incoming(stream).await?
             }
         }
-        // match net {
-        //     "tcp" => router.serve(addr.parse()?).await?,
-        //     "unix" => {
-        //         let uds = UnixListener::bind(addr)?;
-        //         let stream = UnixListenerStream::new(uds);
-        //         router.serve_with_incoming(stream).await?
-        //     }
-        //     "vsock" => VsockListener::bind(cid, port),
-        //     _ => {
-        //         unimplemented!()
-        //     }
-        // }
         Ok(())
     }
 }
@@ -86,25 +74,6 @@ fn vec_to_uuid(v: &Vec<u8>) -> Result<uuid::Uuid, Status> {
     uuid::Uuid::from_slice(v).map_err(|e| Status::invalid_argument(e.to_string()))
 }
 
-// pub struct ByteStream<I> {
-//     inner: I,
-// }
-
-// impl<Inner, B> Stream for ByteStream<Inner>
-// where
-//     Inner: Stream<Item = Result<B, Status>> + Unpin,
-//     B: Into<u8>,
-// {
-//     type Item = Result<u8, RpcInnerError>;
-//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-//         match self.inner.poll_next_unpin(cx) {
-//             Poll::Pending => Poll::Pending,
-//             Poll::Ready(None) => Poll::Ready(None),
-//             Poll::Ready(Some(Ok(b))) => Poll::Ready(Some(Ok(b.into()))),
-//             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
-//         }
-//     }
-// }
 impl From<P9cpuServerError> for tonic::Status {
     fn from(e: P9cpuServerError) -> Self {
         tonic::Status::internal(e.to_string())
@@ -116,24 +85,6 @@ impl P9cpu for P9cpuService {
     type StdoutStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
     type StderrStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
     type NinepForwardStream = Pin<Box<dyn Stream<Item = Result<P9cpuBytes, Status>> + Send>>;
-
-    // async fn ttyin(&self, request: Request<Streaming<rpc::TtyinRequest>>) -> RpcResult<Empty> {
-    //     let mut in_stream = request.into_inner();
-    //     let Some(Ok(rpc::TtyinRequest { id: Some(id), byte:first_byte })) = in_stream.next().await else {
-    //         return Err(Status::invalid_argument("no session id."));
-    //     };
-    //     let sid = vec_to_uuid(&id)?;
-    //     let byte_stream = in_stream.scan((), |_state, req| match req {
-    //         Ok(r) => futures::future::ready(Some(r.byte as u8)),
-    //         Err(e) => futures::future::ready(None),
-    //     });
-    //     let stream = PrependedStream {
-    //         item: Some(first_byte as u8),
-    //         stream: byte_stream,
-    //     };
-    //     self.inner.ttyin(&sid, stream).await?;
-    //     Ok(Response::new(Empty {}))
-    // }
 
     async fn start(&self, request: Request<StartRequest>) -> RpcResult<Empty> {
         let StartRequest { id, cmd: Some(cmd) } = request.into_inner() else {
