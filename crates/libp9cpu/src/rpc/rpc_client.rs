@@ -8,10 +8,10 @@ use tokio::task::JoinHandle;
 use tokio_vsock::VsockStream;
 
 use crate::client::P9cpuClientError;
+use crate::cmd::CommandReq;
 use crate::rpc;
 use crate::rpc::{Empty, StartRequest};
 use crate::Addr;
-use crate::cmd::CommandReq;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Status, Streaming};
@@ -60,7 +60,6 @@ impl From<RpcInnerError> for P9cpuClientError {
 
 pub struct RpcInner {
     channel: Channel,
-    rpc_client: crate::rpc::p9cpu_client::P9cpuClient<Channel>,
 }
 
 impl RpcInner {
@@ -90,11 +89,7 @@ impl RpcInner {
                     .await?
             }
         };
-        let rpc_client = crate::rpc::p9cpu_client::P9cpuClient::new(channel.clone());
-        Ok(Self {
-            channel,
-            rpc_client,
-        })
+        Ok(Self { channel })
     }
 }
 
@@ -148,33 +143,32 @@ impl crate::client::ClientInnerT for RpcInner {
     type Error = RpcInnerError;
     type SessionId = uuid::Uuid;
 
-    async fn dial(&mut self) -> Result<Self::SessionId, Self::Error> {
-        let id_vec = self.rpc_client.dial(Empty {}).await?.into_inner().id;
+    async fn dial(&self) -> Result<Self::SessionId, Self::Error> {
+        let mut client = crate::rpc::p9cpu_client::P9cpuClient::new(self.channel.clone());
+        let id_vec = client.dial(Empty {}).await?.into_inner().id;
         let sid = uuid::Uuid::from_slice(&id_vec)?;
         Ok(sid)
     }
 
-    async fn start(
-        &mut self,
-        sid: Self::SessionId,
-        command: CommandReq,
-    ) -> Result<(), Self::Error> {
+    async fn start(&self, sid: Self::SessionId, command: CommandReq) -> Result<(), Self::Error> {
         let req = StartRequest {
             id: sid.into_bytes().into(),
             cmd: Some(command),
         };
-        self.rpc_client.start(req).await?.into_inner();
+        let mut client = crate::rpc::p9cpu_client::P9cpuClient::new(self.channel.clone());
+        client.start(req).await?.into_inner();
         Ok(())
     }
 
     type EmptyFuture = TryOrErrInto<JoinHandle<Result<(), Self::Error>>>;
 
     type ByteVecStream = ByteVecStream<Streaming<rpc::P9cpuBytes>>;
-    async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error> {
+    async fn stdout(&self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error> {
         let request = crate::rpc::P9cpuSessionId {
             id: sid.into_bytes().into(),
         };
-        let out_stream = self.rpc_client.stdout(request).await?.into_inner();
+        let mut client = crate::rpc::p9cpu_client::P9cpuClient::new(self.channel.clone());
+        let out_stream = client.stdout(request).await?.into_inner();
         Ok(ByteVecStream {
             inner: out_stream,
             name: "stdout",
@@ -182,11 +176,12 @@ impl crate::client::ClientInnerT for RpcInner {
         })
     }
 
-    async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error> {
+    async fn stderr(&self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error> {
         let request = crate::rpc::P9cpuSessionId {
             id: sid.into_bytes().into(),
         };
-        let err_stream = self.rpc_client.stderr(request).await?.into_inner();
+        let mut client = crate::rpc::p9cpu_client::P9cpuClient::new(self.channel.clone());
+        let err_stream = client.stderr(request).await?.into_inner();
         Ok(ByteVecStream {
             inner: err_stream,
             name: "stderr",
@@ -195,7 +190,7 @@ impl crate::client::ClientInnerT for RpcInner {
     }
 
     async fn stdin(
-        &mut self,
+        &self,
         sid: Self::SessionId,
         mut stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Self::EmptyFuture {
@@ -221,7 +216,7 @@ impl crate::client::ClientInnerT for RpcInner {
     }
 
     async fn ninep_forward(
-        &mut self,
+        &self,
         sid: Self::SessionId,
         in_stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Result<Self::ByteVecStream, Self::Error> {
@@ -234,8 +229,8 @@ impl crate::client::ClientInnerT for RpcInner {
             stream: req_stream,
             item: Some(first_req),
         };
-        let out_stream = self
-            .rpc_client
+        let mut client = crate::rpc::p9cpu_client::P9cpuClient::new(self.channel.clone());
+        let out_stream = client
             .ninep_forward(stream)
             .await
             .unwrap()
@@ -247,11 +242,12 @@ impl crate::client::ClientInnerT for RpcInner {
         })
     }
 
-    async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error> {
+    async fn wait(&self, sid: Self::SessionId) -> Result<i32, Self::Error> {
         let req = crate::rpc::P9cpuSessionId {
             id: sid.into_bytes().to_vec(),
         };
-        let resp = self.rpc_client.wait(req).await?;
+        let mut client = crate::rpc::p9cpu_client::P9cpuClient::new(self.channel.clone());
+        let resp = client.wait(req).await?;
 
         Ok(resp.into_inner().code)
     }

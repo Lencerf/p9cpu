@@ -29,10 +29,10 @@ pub trait ClientInnerT {
     type Error: std::error::Error + Sync + Send + 'static;
     type SessionId: Clone + Debug + Sync + Send + 'static;
 
-    async fn dial(&mut self) -> Result<Self::SessionId, Self::Error>;
+    async fn dial(&self) -> Result<Self::SessionId, Self::Error>;
 
     async fn start(
-        &mut self,
+        &self,
         sid: Self::SessionId,
         command: CommandReq,
     ) -> Result<(), Self::Error>;
@@ -40,22 +40,22 @@ pub trait ClientInnerT {
     type EmptyFuture: Future<Output = Result<(), Self::Error>> + Send + 'static;
 
     type ByteVecStream: Stream<Item = Vec<u8>> + Unpin + Send + 'static;
-    async fn stdout(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
-    async fn stderr(&mut self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
+    async fn stdout(&self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
+    async fn stderr(&self, sid: Self::SessionId) -> Result<Self::ByteVecStream, Self::Error>;
 
     async fn stdin(
-        &mut self,
+        &self,
         sid: Self::SessionId,
         stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Self::EmptyFuture;
 
     async fn ninep_forward(
-        &mut self,
+        &self,
         sid: Self::SessionId,
         stream: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
     ) -> Result<Self::ByteVecStream, Self::Error>;
 
-    async fn wait(&mut self, sid: Self::SessionId) -> Result<i32, Self::Error>;
+    async fn wait(&self, sid: Self::SessionId) -> Result<i32, Self::Error>;
 }
 
 struct StreamReader<S> {
