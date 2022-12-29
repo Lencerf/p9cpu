@@ -39,11 +39,7 @@ where
 }
 
 #[derive(Error, Debug)]
-pub enum RpcInnerError {
-    #[error("Command not started")]
-    NotStarted,
-    #[error("Command already started")]
-    AlreadyStarted,
+pub enum RpcError {
     #[error("RPC error: {0}")]
     Rpc(#[from] Status),
     #[error("Invalid UUID: {0}")]
@@ -52,8 +48,8 @@ pub enum RpcInnerError {
     JoinError(#[from] tokio::task::JoinError),
 }
 
-impl From<RpcInnerError> for P9cpuClientError {
-    fn from(error: RpcInnerError) -> Self {
+impl From<RpcError> for P9cpuClientError {
+    fn from(error: RpcError) -> Self {
         P9cpuClientError::Inner(error.into())
     }
 }
@@ -102,7 +98,7 @@ where
     Inner: Stream<Item = Result<B, Status>> + Unpin,
     B: Into<u8>,
 {
-    type Item = Result<u8, RpcInnerError>;
+    type Item = Result<u8, RpcError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.poll_next_unpin(cx) {
             Poll::Pending => Poll::Pending,
@@ -140,7 +136,7 @@ where
 
 #[async_trait]
 impl crate::client::ClientInnerT for RpcClient {
-    type Error = RpcInnerError;
+    type Error = RpcError;
     type SessionId = uuid::Uuid;
 
     async fn dial(&self) -> Result<Self::SessionId, Self::Error> {
