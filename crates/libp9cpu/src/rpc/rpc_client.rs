@@ -58,11 +58,11 @@ impl From<RpcInnerError> for P9cpuClientError {
     }
 }
 
-pub struct RpcInner {
+pub struct RpcClient {
     channel: Channel,
 }
 
-impl RpcInner {
+impl RpcClient {
     pub async fn new(addr: Addr) -> anyhow::Result<Self> {
         let channel = match addr {
             Addr::Uds(addr) => {
@@ -139,7 +139,7 @@ where
 }
 
 #[async_trait]
-impl crate::client::ClientInnerT for RpcInner {
+impl crate::client::ClientInnerT for RpcClient {
     type Error = RpcInnerError;
     type SessionId = uuid::Uuid;
 

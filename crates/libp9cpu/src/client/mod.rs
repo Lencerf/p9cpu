@@ -406,8 +406,8 @@ where
     }
 }
 
-pub async fn rpc_based(addr: Addr) -> Result<P9cpuClient<rpc::rpc_client::RpcInner>> {
-    let inner = rpc::rpc_client::RpcInner::new(addr).await?;
+pub async fn rpc_based(addr: Addr) -> Result<P9cpuClient<rpc::rpc_client::RpcClient>> {
+    let inner = rpc::rpc_client::RpcClient::new(addr).await?;
     let client = P9cpuClient::new(inner).await?;
     Ok(client)
 }
