@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_vsock::VsockStream;
 
-use crate::client::P9cpuClientError;
+use crate::client::ClientError;
 use crate::cmd::CommandReq;
 use crate::rpc;
 use crate::rpc::{Empty, StartRequest};
@@ -48,9 +48,9 @@ pub enum RpcError {
     JoinError(#[from] tokio::task::JoinError),
 }
 
-impl From<RpcError> for P9cpuClientError {
+impl From<RpcError> for ClientError {
     fn from(error: RpcError) -> Self {
-        P9cpuClientError::Inner(error.into())
+        ClientError::Inner(error.into())
     }
 }
 

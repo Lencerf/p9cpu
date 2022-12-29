@@ -200,13 +200,13 @@ where
 
 struct SessionInfo<S> {
     sid: S,
-    handles: Vec<JoinHandle<Result<(), P9cpuClientError>>>,
+    handles: Vec<JoinHandle<Result<(), ClientError>>>,
     stop_tx: broadcast::Sender<()>,
     tty: bool,
 }
 
 #[derive(Error, Debug)]
-pub enum P9cpuClientError {
+pub enum ClientError {
     #[error("Command not started")]
     NotStarted,
     #[error("Command exits with {0}")]
@@ -221,9 +221,9 @@ pub enum P9cpuClientError {
     ChannelClosed,
 }
 
-impl<T> From<mpsc::error::SendError<T>> for P9cpuClientError {
+impl<T> From<mpsc::error::SendError<T>> for ClientError {
     fn from(_: mpsc::error::SendError<T>) -> Self {
-        P9cpuClientError::ChannelClosed
+        ClientError::ChannelClosed
     }
 }
 
@@ -235,7 +235,7 @@ pub struct P9cpuClient<Inner: ClientInnerT> {
 impl<'a, Inner> P9cpuClient<Inner>
 where
     Inner: ClientInnerT,
-    P9cpuClientError: From<Inner::Error>,
+    ClientError: From<Inner::Error>,
 {
     pub async fn new(inner: Inner) -> Result<P9cpuClient<Inner>> {
         Ok(Self {
@@ -251,7 +251,7 @@ where
         sid: Inner::SessionId,
         tty: bool,
         mut stop_rx: broadcast::Receiver<()>,
-    ) -> Result<Vec<JoinHandle<Result<(), P9cpuClientError>>>, Inner::Error> {
+    ) -> Result<Vec<JoinHandle<Result<(), ClientError>>>, Inner::Error> {
         let mut handles = vec![];
 
         let out_stream = self.inner.stdout(sid.clone()).await?;
@@ -296,7 +296,7 @@ where
         mut src: Inner::ByteVecStream,
         mut dst: D,
         flush: bool,
-    ) -> JoinHandle<Result<(), P9cpuClientError>>
+    ) -> JoinHandle<Result<(), ClientError>>
     where
         D: AsyncWrite + Unpin + Send + 'static,
     {
@@ -312,9 +312,9 @@ where
         })
     }
 
-    pub async fn start(&mut self, command: Command) -> Result<(), P9cpuClientError> {
+    pub async fn start(&mut self, command: Command) -> Result<(), ClientError> {
         if self.session_info.is_some() {
-            return Err(P9cpuClientError::AlreadyStarted)?;
+            return Err(ClientError::AlreadyStarted)?;
         }
         let tty = command.req.tty;
         let sid = self.inner.dial().await?;
@@ -362,7 +362,7 @@ where
         if code == 0 {
             Ok(())
         } else {
-            Err(P9cpuClientError::NonZeroExitCode(code))?
+            Err(ClientError::NonZeroExitCode(code))?
         }
     }
 
@@ -375,7 +375,7 @@ where
         } = self
             .session_info
             .take()
-            .ok_or(P9cpuClientError::NotStarted)?;
+            .ok_or(ClientError::NotStarted)?;
         let mut termios_attr = None;
         if tty {
             let current = nix::sys::termios::tcgetattr(0)?;
