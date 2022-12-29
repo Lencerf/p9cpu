@@ -6,8 +6,8 @@ edition = "2021"
 [dependencies]
 libp9cpu = { version = "*", path = "../libp9cpu" }
 futures = "0.3.25"
-async-trait = "0.1.59"
-prost = "0.11.3"
+async-trait = "0.1.60"
+prost = "0.11.5"
 tonic = "0.8.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread","process","io-std"] }
 tokio-stream = { version = "0.1.11", features = ["net"] }
@@ -15,8 +15,8 @@ uuid = { version = "1.2.2", features = ["v4","fast-rng","macro-diagnostics"] }
 thiserror = "1"
 anyhow = { version = "1", features = ["backtrace"] }
 tower = "0.4.13"
-clap = { version = "4.0.29", features = ["derive"] }
-libc = "0.2.138"
+clap = { version = "4.0.32", features = ["derive"] }
+libc = "0.2.139"
 nix = "0.26.1"
 tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = ["tonic-conn"], rev = "e502caf"  }
 vsock = "0.3.0"
