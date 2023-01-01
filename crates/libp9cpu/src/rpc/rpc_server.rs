@@ -113,7 +113,7 @@ impl P9cpu for P9cpuService {
             stream: byte_stream,
             item: Some(data),
         };
-        self.inner.stdin(&sid, stream).await?;
+        self.inner.stdin_st(&sid, stream).await?;
         Ok(Response::new(Empty {}))
     }
 

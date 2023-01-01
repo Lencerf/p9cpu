@@ -20,7 +20,7 @@ use tower::service_fn;
 use super::PrependedStream;
 
 pub struct TryOrErrInto<F> {
-    future: F,
+    pub future: F,
 }
 
 impl<F, R, E1, E2> Future for TryOrErrInto<F>

@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::cmd::CommandReq;
-use crate::{cmd::FsTab, rpc};
+use crate::{cmd::FsTab, rpc, ssh};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{ready, Stream, StreamExt};
@@ -286,10 +286,28 @@ impl TryFrom<FsTab> for MountParams {
 
 mod pre_exec;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct P9cpuServerInner<I> {
     sessions: Arc<RwLock<HashMap<I, Session>>>,
     pending: Arc<RwLock<HashMap<I, PendingSession>>>,
+}
+
+impl<I> Default for P9cpuServerInner<I>
+where
+    I: Default,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<I> P9cpuServerInner<I> {
+    pub fn new() -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            pending: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 impl<SID> P9cpuServerInner<SID>
@@ -483,7 +501,7 @@ where
         Ok(())
     }
 
-    pub async fn stdin(
+    pub async fn stdin_st(
         &self,
         sid: &SID,
         mut in_stream: impl Stream<Item = Vec<u8>> + Unpin,
@@ -497,6 +515,16 @@ where
                 .await
                 .map_err(P9cpuServerError::IoErr)?;
         }
+        Ok(())
+    }
+
+    pub async fn stdin(&self, sid: &SID, data: &[u8]) -> Result<(), P9cpuServerError> {
+        let cmd_stdin = self.get_session(sid, |s| s.stdin.clone()).await?;
+        let mut cmd_stdin = cmd_stdin.write().await;
+        cmd_stdin
+            .write_all(data)
+            .await
+            .map_err(P9cpuServerError::IoErr)?;
         Ok(())
     }
 
@@ -760,6 +788,10 @@ where
 
 pub fn rpc_based() -> rpc::rpc_server::RpcServer {
     rpc::rpc_server::RpcServer {}
+}
+
+pub fn ssh_based() -> ssh::ssh_server::SshServer {
+    ssh::ssh_server::SshServer {}
 }
 
 // #[cfg(test)]

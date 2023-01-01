@@ -11,6 +11,12 @@ enum Net {
     Unix,
 }
 
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum Protocol {
+    Rpc,
+    Ssh
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -20,6 +26,9 @@ struct Args {
     port: u32,
     #[arg(long)]
     uds: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = Protocol::Rpc)]
+    protocol: Protocol,
 }
 
 pub fn log_format(
@@ -43,7 +52,6 @@ async fn main() -> Result<()> {
     Logger::try_with_env()?.format(log_format).start()?;
     log::info!("p9cpud started...");
     let args = Args::parse();
-    let server = libp9cpu::server::rpc_based();
     let addr = match args.net {
         Net::Vsock => libp9cpu::Addr::Vsock(tokio_vsock::VsockAddr::new(
             vsock::VMADDR_CID_ANY,
@@ -52,6 +60,15 @@ async fn main() -> Result<()> {
         Net::Tcp => libp9cpu::Addr::Tcp(format!("[::]:{}", args.port).parse().unwrap()),
         Net::Unix => libp9cpu::Addr::Uds(args.uds.unwrap()),
     };
-    server.serve(addr).await?;
+    match args.protocol {
+        Protocol::Rpc => {
+            let server = libp9cpu::server::rpc_based();
+            server.serve(addr).await?;
+        }
+        Protocol::Ssh => {
+            let server = libp9cpu::server::ssh_based();
+            server.serve(addr).await?;
+        }
+    }
     Ok(())
 }

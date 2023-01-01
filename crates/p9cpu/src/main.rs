@@ -14,11 +14,20 @@ enum Net {
     // UnixVsock,
 }
 
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum Protocol {
+    Rpc,
+    Ssh
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(long, value_enum, default_value_t = Net::Tcp)]
     net: Net,
+
+    #[arg(long, value_enum, default_value_t = Protocol::Rpc)]
+    protocol: Protocol,
 
     #[arg(long, default_value_t = 17010)]
     port: u32,
@@ -77,7 +86,6 @@ async fn app(args: Args) -> Result<()> {
         Net::Unix => libp9cpu::Addr::Uds(args.host),
         Net::Tcp => libp9cpu::Addr::Tcp(format!("{}:{}", args.host, args.port).parse()?),
     };
-    let mut client = libp9cpu::client::rpc_based(addr).await?;
 
     if args.tmp_mnt.is_empty() {
         println!("tmpmnt cannot be emepty");
@@ -104,8 +112,19 @@ async fn app(args: Args) -> Result<()> {
     cmd.tty(args.tty);
     cmd.tmp_mnt(args.tmp_mnt);
 
-    client.start(cmd).await?;
-    client.wait().await?;
+
+    match args.protocol {
+        Protocol::Rpc => {
+            let mut client = libp9cpu::client::rpc_based(addr).await?;
+            client.start(cmd).await?;
+            client.wait().await?;
+        }
+        Protocol::Ssh => {
+            let mut client = libp9cpu::client::ssh_based(addr).await.unwrap();
+            client.start(cmd).await?;
+            client.wait().await?;
+        }
+    }
     Ok(())
 }
 

@@ -12,22 +12,32 @@ futures = "0.3.25"
 async-trait = "0.1.60"
 prost = "0.11.5"
 tonic = "0.8.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread","process","io-std", "fs", "io-util"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "io-std",
+    "fs",
+    "io-util",
+] }
 tokio-stream = { version = "0.1.11", features = ["net"] }
-uuid = { version = "1.2.2", features = ["v4","fast-rng","macro-diagnostics"] }
+uuid = { version = "1.2.2", features = ["v4", "fast-rng", "macro-diagnostics"] }
 thiserror = "1"
 anyhow = "1"
 tower = "0.4.13"
 nix = "0.26.1"
 libc = "0.2.139"
 close_fds = "0.3"
-tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = ["tonic-conn"], rev = "e502caf"  }
+tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = [
+    "tonic-conn",
+], rev = "e502caf" }
 vsock = "0.3.0"
-rust-9p = { path = "../9p", version = "*"}
+rust-9p = { path = "../9p", version = "*" }
 tokio-util = { version = "0.7.4", features = ["io"] }
 log = "0.4"
 os_pipe = "1.1.2"
-tokio-fd = { path = "/usr/local/google/home/changyuanl/rust-repos/tokio-fd" }
+russh = { git = "https://github.com/warp-tech/russh.git", rev = "f08f749" }
+russh-keys = { git = "https://github.com/warp-tech/russh.git", rev = "f08f749" }
 
 [build-dependencies]
 tonic-build = "0.8.4"

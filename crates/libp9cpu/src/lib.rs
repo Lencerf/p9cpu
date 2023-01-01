@@ -4,6 +4,7 @@ pub mod client;
 pub mod cmd;
 pub mod rpc;
 pub mod server;
+pub mod ssh;
 
 // pub type Command = crate::cmd::Command;
 // pub type EnvVar = crate::cmd::EnvVar;

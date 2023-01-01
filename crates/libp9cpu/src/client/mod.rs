@@ -3,9 +3,9 @@ use std::path::Path;
 use std::pin::Pin;
 use std::vec;
 
-use crate::rpc;
-use crate::Addr;
 use crate::cmd::{Command, CommandReq};
+use crate::{rpc, ssh};
+use crate::Addr;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Future;
@@ -20,7 +20,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// A transport-layer client.
-/// 
+///
 /// This trait defines a client that handles the handles the data transfer
 /// between the local and the remote machine. [RpcInner](rpc::rpc_client::RpcInner)
 /// is an implementation based on gRPC.
@@ -31,11 +31,7 @@ pub trait ClientInnerT {
 
     async fn dial(&self) -> Result<Self::SessionId, Self::Error>;
 
-    async fn start(
-        &self,
-        sid: Self::SessionId,
-        command: CommandReq,
-    ) -> Result<(), Self::Error>;
+    async fn start(&self, sid: Self::SessionId, command: CommandReq) -> Result<(), Self::Error>;
 
     type EmptyFuture: Future<Output = Result<(), Self::Error>> + Send + 'static;
 
@@ -56,6 +52,23 @@ pub trait ClientInnerT {
     ) -> Result<Self::ByteVecStream, Self::Error>;
 
     async fn wait(&self, sid: Self::SessionId) -> Result<i32, Self::Error>;
+}
+
+pub struct CmdResult {
+
+}
+
+#[async_trait]
+pub trait ClientInnerT2 {
+    type Error: std::error::Error + Sync + Send + 'static;
+    type SessionId: Clone + Debug + Sync + Send + 'static;
+
+    async fn run_cmd(
+        &self,
+        req: &CommandReq,
+        stdin: impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin,
+        ninep_in: Option<impl Stream<Item = Vec<u8>> + Send + Sync + 'static + Unpin>, 
+    );
 }
 
 struct StreamReader<S> {
@@ -300,7 +313,6 @@ where
     where
         D: AsyncWrite + Unpin + Send + 'static,
     {
-        
         tokio::spawn(async move {
             while let Some(bytes) = src.next().await {
                 dst.write_all(&bytes).await?;
@@ -345,7 +357,7 @@ where
         self.inner.start(sid.clone(), command.req).await?;
         println!("will set up stdio");
         let (stop_tx, stop_rx) = broadcast::channel(1);
-        
+
         let handles = self.setup_stdio(sid.clone(), tty, stop_rx).await?;
 
         self.session_info = Some(SessionInfo {
@@ -372,10 +384,7 @@ where
             handles,
             stop_tx,
             tty,
-        } = self
-            .session_info
-            .take()
-            .ok_or(ClientError::NotStarted)?;
+        } = self.session_info.take().ok_or(ClientError::NotStarted)?;
         let mut termios_attr = None;
         if tty {
             let current = nix::sys::termios::tcgetattr(0)?;
@@ -408,6 +417,12 @@ where
 
 pub async fn rpc_based(addr: Addr) -> Result<P9cpuClient<rpc::rpc_client::RpcClient>> {
     let inner = rpc::rpc_client::RpcClient::new(addr).await?;
+    let client = P9cpuClient::new(inner).await?;
+    Ok(client)
+}
+
+pub async fn ssh_based(addr: Addr) -> Result<P9cpuClient<ssh::ssh_client::SshClient>> {
+    let inner = ssh::ssh_client::SshClient::new(addr).await?;
     let client = P9cpuClient::new(inner).await?;
     Ok(client)
 }
