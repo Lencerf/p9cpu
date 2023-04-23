@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 futures = "0.3.25"
-async-trait = "0.1.60"
+async-trait = "0.1.61"
 prost = "0.11.5"
 tonic = "0.8.3"
 tokio = { version = "1", features = [
@@ -28,9 +28,7 @@ tower = "0.4.13"
 nix = "0.26.1"
 libc = "0.2.139"
 close_fds = "0.3"
-tokio-vsock = { git = "https://github.com/Lencerf/tokio-vsock/", features = [
-    "tonic-conn",
-], rev = "e502caf" }
+tokio-vsock = { version = "0.4", features = ["tonic-conn"] }
 vsock = "0.3.0"
 rust-9p = { path = "../9p", version = "*" }
 tokio-util = { version = "0.7.4", features = ["io"] }

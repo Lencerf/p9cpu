@@ -25,7 +25,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 #[async_trait]
 pub trait P9cpuServerT {
-    async fn serve(&self, addr: crate::Addr) -> Result<()>;
+    type Error: std::error::Error;
+    async fn serve(&self, addr: crate::Addr) -> Result<(), Self::Error>;
 }
 
 enum ChildStdio {
@@ -747,7 +748,8 @@ where
         // });
         let handle = tokio::spawn(f);
         *session.ninep.write().await = Some((port, handle));
-        Ok(ReceiverStream::new(rx))
+        let a = Ok(ReceiverStream::new(rx));
+        a
     }
 
     pub async fn wait(&self, sid: &SID) -> Result<i32, P9cpuServerError> {

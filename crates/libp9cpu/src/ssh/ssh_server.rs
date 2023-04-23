@@ -22,14 +22,17 @@ pub enum SshError {
     #[error("cpud error: {0}")]
     Cpud(#[from] P9cpuServerError),
     #[error("Invalid data: {0}")]
-    InvalidProto(#[from] prost::DecodeError)
+    InvalidProto(#[from] prost::DecodeError),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub struct SshServer {}
 
 #[async_trait]
 impl crate::server::P9cpuServerT for SshServer {
-    async fn serve(&self, addr: Addr) -> Result<()> {
+    type Error = SshError;
+    async fn serve(&self, addr: Addr) -> Result<(), SshError> {
         let client_key = russh_keys::key::KeyPair::generate_ed25519().unwrap();
         let client_pubkey = Arc::new(client_key.clone_public_key().unwrap());
         let mut config = russh::server::Config::default();

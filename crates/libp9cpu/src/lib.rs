@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 pub mod client;
 pub mod cmd;
-pub mod rpc;
+mod rpc;
 pub mod server;
 pub mod ssh;
 

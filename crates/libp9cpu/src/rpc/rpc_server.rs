@@ -10,6 +10,7 @@ use crate::Addr;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use std::any;
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::task::Poll;
@@ -41,11 +42,23 @@ impl Stream for VsockListenerStream {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum RpcServerError {
+    #[error("RPC error: {0}")]
+    Transport(#[from] tonic::transport::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+} 
+
 pub struct RpcServer {}
 
 #[async_trait]
 impl crate::server::P9cpuServerT for RpcServer {
-    async fn serve(&self, addr: Addr) -> Result<()> {
+    type Error = RpcServerError;
+    async fn serve(&self, addr: Addr) -> Result<(), RpcServerError> {
         let p9cpu_service = p9cpu_server::P9cpuServer::new(P9cpuService::default());
         let router = Server::builder().add_service(p9cpu_service);
         match addr {

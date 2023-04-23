@@ -2,8 +2,8 @@
 
 use futures::Stream;
 
-pub mod rpc_client;
-pub mod rpc_server;
+pub(crate) mod rpc_client;
+pub(crate) mod rpc_server;
 
 tonic::include_proto!("p9cpu");
 
